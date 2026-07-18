@@ -1,0 +1,54 @@
+%%{init: {"flowchart": {"htmlLabels": true, "curve": "basis"}} }%%
+flowchart TB
+
+%% =====================================================================
+%% FLOW 7 — Autoscaling + observability: how the cluster reacts to load.
+%% Pod scaling ①→④, Node scaling Ⓐ→Ⓒ, Observability ⓧ→ⓩ.
+%% =====================================================================
+
+  LOAD["📈 Traffic spike<br/>CPU on api pods rises"]
+
+  subgraph PODSCALE["Horizontal Pod Autoscaling"]
+    CADV["① cAdvisor in kubelet<br/>measures pod CPU/mem"]
+    MS["② metrics-server<br/>aggregates usage"]
+    HPA["③ HPA controller<br/>desired = ceil(cur × usage/target)"]
+    DEP["④ Deployment replicas ↑<br/>3 → 8"]
+  end
+
+  subgraph NODESCALE["Cluster / Node Autoscaling"]
+    PENDING["Ⓐ new pods Pending<br/>(no room on nodes)"]
+    CAK["Ⓑ Cluster Autoscaler / Karpenter"]
+    NEWNODE["Ⓒ new EC2 node joins<br/>pods schedule"]
+  end
+
+  subgraph OBS["Observability pipeline"]
+    APPMET["ⓧ app /metrics<br/>+ kube-state-metrics<br/>+ node-exporter"]
+    PROM["ⓨ Prometheus<br/>scrape + store TSDB"]
+    GRAF["Grafana dashboards"]
+    ALERT["ⓩ Alertmanager<br/>burn-rate / error-rate alerts"]
+    PD["PagerDuty → on-call"]
+  end
+
+  VPA["VPA (recommend mode)<br/>right-size requests/limits"]
+
+  LOAD --> CADV --> MS --> HPA --> DEP
+  DEP --> PENDING --> CAK --> NEWNODE
+  APPMET --> PROM --> GRAF
+  PROM --> ALERT --> PD
+  PROM -. custom metrics (RPS, queue depth) .-> HPA
+  VPA -. sizing advice .-> DEP
+
+  click LOAD t "Load rises. The system should add capacity automatically at two levels: more pods (HPA) and, if pods don't fit, more nodes (Cluster Autoscaler)."
+  click CADV t "cAdvisor is built into the kubelet and measures per-container CPU/memory from cgroups."
+  click MS t "metrics-server aggregates those numbers cluster-wide. It's the source for 'kubectl top' and the HPA's CPU/memory decisions. It keeps NO history."
+  click HPA t "The HPA controller compares current usage to the target and computes desired replicas = ceil(currentReplicas × currentMetric/targetMetric). Stabilization windows prevent flapping."
+  click DEP t "The HPA edits the Deployment's replica count; the ReplicaSet controller then creates the extra pods — normal scheduling takes over."
+  click PENDING t "If existing nodes lack capacity, the new pods sit Pending. That Pending state is the trigger for node autoscaling."
+  click CAK t "Cluster Autoscaler (or Karpenter) sees unschedulable pods and provisions new nodes; it also removes underused nodes later. Respects PodDisruptionBudgets on scale-down."
+  click NEWNODE t "A new EC2 node joins the cluster, the kubelet registers it, and the Pending pods get scheduled onto it."
+  click APPMET t "Three exporters feed metrics: the app's own /metrics (business + latency), kube-state-metrics (object state like replica counts), node-exporter (host CPU/disk/network). You need all three."
+  click PROM t "Prometheus scrapes these endpoints on an interval and stores time series. Unlike metrics-server it keeps HISTORY — enabling trends, capacity planning, and alerting."
+  click GRAF t "Grafana renders Prometheus data as dashboards for humans."
+  click ALERT t "Alertmanager fires on SYMPTOMS (high error rate, SLO burn rate, latency) — not causes like 'a pod restarted'. It dedups, groups, and routes alerts."
+  click PD t "PagerDuty pages the on-call engineer. Good alerts are actionable and tied to user impact."
+  click VPA t "The Vertical Pod Autoscaler recommends right-sized CPU/memory requests from real usage. Use its recommend mode to fix the 'set limits high to be safe' waste. Don't run VPA auto-mode + HPA on the same CPU metric — they fight."

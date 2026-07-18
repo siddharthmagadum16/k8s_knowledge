@@ -1,0 +1,60 @@
+%%{init: {"flowchart": {"htmlLabels": true, "curve": "basis"}} }%%
+flowchart TB
+
+%% =====================================================================
+%% FLOW 4 — How a user request reaches a Pod, and how Pods reach each other.
+%% External (north-south) path ①→⑦, internal (east-west) path Ⓐ→Ⓒ.
+%% =====================================================================
+
+  USER["🌐 End user<br/>https://shopfast.com"]
+
+  subgraph EXT["External / Cloud edge"]
+    DNS["① Route 53 DNS"]
+    LB["② Cloud Load Balancer<br/>(NLB/ALB)"]
+  end
+
+  subgraph CLUSTER["☸️ Cluster"]
+    INGCTL["③ Ingress Controller Pod<br/>(nginx) — host/path routing + TLS"]
+    SVC["④ Service (ClusterIP)<br/>stable virtual IP"]
+    EPS["⑤ EndpointSlice<br/>list of healthy Pod IPs"]
+    KPROXY["⑥ kube-proxy rules<br/>iptables / IPVS — DNAT"]
+    POD1["⑦ frontend Pod A"]
+    POD2["frontend Pod B"]
+
+    subgraph EASTWEST["East-West: Pod → Pod"]
+      APIPOD["api Pod"]
+      DNS2["Ⓐ CoreDNS<br/>resolve db.svc.cluster.local"]
+      DBSVC["Ⓑ postgres Service"]
+      DBPOD["Ⓒ postgres Pod"]
+    end
+
+    NETPOL["NetworkPolicy<br/>(enforced by CNI)"]
+  end
+
+  USER --> DNS --> LB --> INGCTL
+  INGCTL --> SVC
+  SVC -. selects pods by label .-> EPS
+  SVC --> KPROXY
+  KPROXY --> POD1
+  KPROXY --> POD2
+
+  APIPOD -->|Ⓐ DNS lookup| DNS2
+  DNS2 -->|returns ClusterIP| APIPOD
+  APIPOD -->|Ⓑ connect to ClusterIP| DBSVC
+  DBSVC --> DBPOD
+  NETPOL -. allow/deny .-> DBPOD
+
+  click USER t "The user only knows the public hostname. Everything past the load balancer is invisible to them."
+  click DNS t "Route 53 resolves shopfast.com to the load balancer's public IP/hostname."
+  click LB t "Cloud LB spreads traffic across nodes. Created automatically by cloud-controller-manager for a Service type=LoadBalancer or an Ingress."
+  click INGCTL t "The Ingress Controller is a reverse proxy (nginx) running as Pods. It reads Ingress objects and applies host/path routing rules and terminates TLS. Ingress objects alone do nothing without a controller."
+  click SVC t "A Service is a STABLE virtual IP (ClusterIP) + DNS name in front of a changing set of pods. Pods die and get new IPs; the Service IP never changes."
+  click EPS t "EndpointSlices are the live list of Pod IPs backing a Service, kept in sync by the endpoint controller. Only Ready pods are listed. Empty EndpointSlice = 'service has no endpoints' = 503."
+  click KPROXY t "kube-proxy turns the Service's virtual IP into real routing by programming iptables (O(n) rules) or IPVS (hash table, scales better). It DNATs the ClusterIP to a randomly chosen backend Pod IP."
+  click POD1 t "A backend pod. Its IP is ephemeral — that's why clients target the Service, never the pod IP directly."
+  click POD2 t "Another backend pod. kube-proxy load-balances across all Ready backends."
+  click APIPOD t "Pod-to-pod (east-west) traffic: the api pod needs to reach Postgres. It uses the Service DNS name, not a hardcoded IP."
+  click DNS2 t "CoreDNS resolves postgres.shop.svc.cluster.local to the Postgres Service's ClusterIP. Every pod's /etc/resolv.conf points here."
+  click DBSVC t "The Postgres Service gives the DB a stable address even though the pod may be rescheduled."
+  click DBPOD t "The actual Postgres pod. Traffic arrives via the same kube-proxy DNAT mechanism."
+  click NETPOL t "NetworkPolicy is a firewall for pods (e.g. only api pods may reach Postgres:5432). CRITICAL: it is enforced by the CNI plugin, not the apiserver — with a CNI that doesn't support it, the policy is silently ignored and everything is allowed."

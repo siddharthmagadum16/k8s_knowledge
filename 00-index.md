@@ -2,6 +2,10 @@
 
 A from-scratch to senior-infra-engineer reference. Part 1 covers what every Kubernetes user needs to know. Part 2 covers what separates a senior infra/DevOps engineer from everyone else — internals, failure modes, and production judgment.
 
+## 📊 Visual architecture map
+
+Start here for the mental model: **[k8s-architecture-map.html](k8s-architecture-map.html)** — seven interactive Mermaid diagrams (one worked example: an e-commerce company on EKS) with **hover tooltips on every component** and numbered flows. Open the HTML in a browser for the full experience; the standalone `.mmd` sources and details are in [diagrams/](diagrams/00-diagrams-index.md).
+
 ## Part 1 — Fundamentals
 
 1. [Introduction and Architecture](01-introduction-and-architecture.md) — why Kubernetes exists, control plane and node components, request flow

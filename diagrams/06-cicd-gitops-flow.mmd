@@ -1,0 +1,57 @@
+%%{init: {"flowchart": {"htmlLabels": true, "curve": "basis"}} }%%
+flowchart TB
+
+%% =====================================================================
+%% FLOW 6 — CI/CD + GitOps: from `git push` to running pods, safely.
+%% Follow ① → ⑫. Note Docker builds; the cluster only pulls + runs.
+%% =====================================================================
+
+  DEV["① Developer<br/>git push"]
+
+  subgraph CI["🏗️ CI pipeline (outside cluster)"]
+    BUILD["② docker build<br/>image:git-sha (immutable tag)"]
+    TEST["③ unit + integration tests"]
+    SCAN["④ Trivy scan (CVEs)"]
+    SIGN["⑤ cosign sign digest"]
+    PUSH["⑥ push → registry"]
+    BUMP["⑦ bump image tag in<br/>config repo (open PR)"]
+  end
+
+  REG[("Registry (ECR)")]
+  CONF["⑧ Config Repo merged<br/>desired state = new tag"]
+
+  subgraph CD["🚢 GitOps + cluster"]
+    ARGO["⑨ Argo CD detects drift<br/>(git ≠ live)"]
+    API["⑩ kube-apiserver<br/>apply manifests"]
+    ADM["⑪ Admission (Kyverno)<br/>verify signature + policy"]
+    ROLL["⑫ Rolling update<br/>Deployment → new ReplicaSet"]
+    OLD["old pods (v1)"]
+    NEW["new pods (v2)"]
+  end
+
+  ROLLBACK["Rollback = git revert<br/>Argo re-syncs to old tag"]
+
+  DEV --> BUILD --> TEST --> SCAN --> SIGN --> PUSH --> REG
+  PUSH --> BUMP --> CONF
+  CONF -.watched.-> ARGO
+  ARGO --> API --> ADM --> ROLL
+  ROLL --> NEW
+  ROLL -. scale down .-> OLD
+  ROLLBACK -.-> CONF
+
+  click DEV t "A single git push is the only manual step. Everything downstream is automated and auditable through Git history."
+  click BUILD t "Docker/BuildKit builds the image and tags it with the immutable git SHA — NEVER :latest. Immutable tags make rollbacks deterministic and caching correct."
+  click TEST t "Automated tests gate the pipeline. A failure stops the image from ever reaching the registry."
+  click SCAN t "Trivy blocks images with known critical CVEs before they can be deployed."
+  click SIGN t "cosign signs the image digest. The signature is checked at admission time inside the cluster, so unsigned images can't run."
+  click PUSH t "The verified, signed image is pushed to the registry — the one artifact the cluster will actually pull."
+  click BUMP t "CI does NOT kubectl apply to prod. Instead it updates the image tag in the config repo via a PR. Git stays the single source of truth."
+  click REG t "Immutable, content-addressable image storage. Nodes pull by digest for guaranteed integrity."
+  click CONF t "Once the PR merges, the config repo declares the new desired state. This merge is the real 'deploy' trigger."
+  click ARGO t "Argo CD continuously diffs the config repo against the live cluster. On drift it reconciles — either auto-sync or after human approval."
+  click API t "Argo applies the manifests through the normal apiserver path — same authN/authZ/admission as any other client."
+  click ADM t "Admission webhooks (Kyverno/OPA Gatekeeper) enforce policy: verify the cosign signature, require resource limits, block privileged pods, etc. This is where supply-chain trust is enforced."
+  click ROLL t "The Deployment controller creates a new ReplicaSet and shifts pods over per maxSurge/maxUnavailable — zero-downtime rolling update. (Canary/blue-green via Argo Rollouts extends this.)"
+  click OLD t "Old version pods are drained only as new ones become Ready, so capacity never drops below the threshold."
+  click NEW t "New version pods must pass readiness before receiving traffic and before old pods are removed."
+  click ROLLBACK t "Rollback is just a git revert of the tag bump. Argo re-syncs to the previous known-good state — fast and auditable, no snowflake manual fixes."

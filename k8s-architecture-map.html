@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Kubernetes Architecture Map — ShopFast on EKS</title>
+<style>
+  :root{
+    --bg:#f6f8fa; --panel:#ffffff; --ink:#1f2328; --muted:#57606a;
+    --border:#d0d7de; --accent:#1f6feb; --accent2:#8250df; --code:#eff1f3;
+  }
+  :root[data-theme="dark"]{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#9198a1;
+    --border:#30363d; --accent:#58a6ff; --accent2:#bc8cff; --code:#1b2029;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  header{position:sticky;top:0;z-index:20;background:var(--panel);
+    border-bottom:1px solid var(--border);padding:14px 22px;
+    display:flex;align-items:center;gap:16px;flex-wrap:wrap;}
+  header h1{font-size:18px;margin:0;font-weight:650}
+  header .sub{color:var(--muted);font-size:13px}
+  .wrap{max-width:1200px;margin:0 auto;padding:24px 22px 80px}
+  .lead{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+    padding:18px 20px;margin-bottom:22px}
+  .legend{display:flex;gap:22px;flex-wrap:wrap;margin-top:12px;font-size:13px;color:var(--muted)}
+  .legend b{color:var(--ink)}
+  .toc{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;margin-top:14px}
+  .toc a{display:block;padding:10px 12px;background:var(--code);border:1px solid var(--border);
+    border-radius:9px;text-decoration:none;color:var(--ink);font-size:13.5px}
+  .toc a:hover{border-color:var(--accent)}
+  .toc a b{color:var(--accent)}
+  section{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+    padding:20px 22px;margin-bottom:26px;scroll-margin-top:74px}
+  section h2{margin:0 0 4px;font-size:17px}
+  section .tag{color:var(--muted);font-size:12.5px;text-transform:uppercase;letter-spacing:.04em}
+  .flow{margin:14px 0 6px;padding-left:20px}
+  .flow li{margin:3px 0;color:var(--muted)}
+  .flow li b{color:var(--ink)}
+  .diagram{overflow-x:auto;background:var(--code);border:1px solid var(--border);
+    border-radius:10px;padding:16px;margin-top:14px}
+  .diagram svg{max-width:none;height:auto;display:block;margin:0 auto}
+  .hint{font-size:12.5px;color:var(--muted);margin-top:8px}
+  button.theme{margin-left:auto;background:var(--code);color:var(--ink);
+    border:1px solid var(--border);border-radius:8px;padding:7px 12px;cursor:pointer;font-size:13px}
+  code{background:var(--code);padding:1px 5px;border-radius:5px;font-size:.9em}
+  .foot{color:var(--muted);font-size:13px;border-top:1px solid var(--border);padding-top:18px;margin-top:10px}
+  /* mermaid tooltip styling */
+  .mermaidTooltip{position:absolute;max-width:320px;padding:9px 12px;background:#ffffff;
+    color:#000000;border:1px solid #58a6ff;border-radius:8px;font-size:12.5px;line-height:1.45;
+    pointer-events:none;z-index:100;box-shadow:0 6px 24px rgba(0,0,0,.4)}
+  .err{color:#cf222e;font-family:monospace;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>☸️ Kubernetes Architecture Map</h1>
+    <div class="sub">A complete, hover-annotated tour — worked example: <b>“ShopFast”</b>, an e-commerce company on AWS EKS</div>
+  </div>
+  <button class="theme" onclick="toggleTheme()">🌓 Theme</button>
+</header>
+
+<div class="wrap">
+  <div class="lead">
+    <b>How to use this page.</b> Each box is a real Kubernetes (or surrounding) component. <b>Hover any box</b> to see a one-line explanation of what it is and does. Numbers/circled digits show the <b>order of a flow</b>. Diagram 1 is the static big picture; diagrams 2–7 are the dynamic flows that bring it to life.
+    <div class="legend">
+      <span><b>──▶</b> live data / traffic</span>
+      <span><b>&nbsp;·&nbsp;·▶</b> watch / control (reconcile)</span>
+      <span><b>①②③</b> ordered flow step</span>
+      <span><b>( )</b> cylinder = datastore</span>
+    </div>
+    <div class="toc" id="toc"></div>
+  </div>
+
+  <section id="d1">
+    <div class="tag">Diagram 1 · The big picture</div>
+    <h2>Master architecture — every subsystem at once</h2>
+    <p>Everything ShopFast runs, grouped: who talks to the cluster, how images are built and delivered, the cloud underneath, the control plane brain, the cluster add-ons, and the worker nodes where pods actually run. Solid arrows are live traffic; dotted arrows are the watch/reconcile control relationships. <b>Hover every box</b> — this one diagram carries ~35 tooltips.</p>
+    <div class="diagram" id="c1"></div>
+    <div class="hint">Tip: the single most important idea here — <b>every component talks only to the kube-apiserver</b>, and only the apiserver talks to etcd.</div>
+  </section>
+
+  <section id="d2">
+    <div class="tag">Diagram 2 · Control flow</div>
+    <h2>What actually happens on <code>kubectl apply</code></h2>
+    <ol class="flow">
+      <li><b>①–③</b> Request is authenticated, authorized (RBAC), then run through admission webhooks.</li>
+      <li><b>④–⑤</b> apiserver validates and writes the Deployment to etcd — only now does it “exist”.</li>
+      <li><b>⑥–⑧</b> Deployment controller → ReplicaSet controller → 3 Pending Pod objects (no node yet).</li>
+      <li><b>⑨</b> Scheduler binds each pod to a node (just writes <code>spec.nodeName</code>).</li>
+      <li><b>⑩–⑫</b> kubelet on that node pulls the image via containerd, starts it, reports Running back up.</li>
+    </ol>
+    <div class="diagram" id="c2"></div>
+  </section>
+
+  <section id="d3">
+    <div class="tag">Diagram 3 · Node-level detail</div>
+    <h2>Scheduling decision + container startup (and where Docker fits)</h2>
+    <ol class="flow">
+      <li><b>①–③</b> Scheduler <b>filters</b> nodes that can’t fit, <b>scores</b> the rest, and <b>binds</b> the winner.</li>
+      <li><b>Build lane</b> shows the truth about Docker: it <b>builds</b> the image in CI; the cluster runs <b>containerd</b>, not Docker.</li>
+      <li><b>④–⑦</b> kubelet → containerd pulls image → creates the <code>pause</code> sandbox → CNI assigns the pod IP.</li>
+      <li><b>⑧–⑪</b> init containers → app containers → probes → Ready → added to the Service’s EndpointSlice.</li>
+    </ol>
+    <div class="diagram" id="c3"></div>
+  </section>
+
+  <section id="d4">
+    <div class="tag">Diagram 4 · Networking</div>
+    <h2>How a request reaches a pod, and how pods reach each other</h2>
+    <ol class="flow">
+      <li><b>①–⑦ (north-south)</b> user → DNS → cloud LB → Ingress Controller → Service → kube-proxy DNAT → pod.</li>
+      <li><b>Ⓐ–Ⓒ (east-west)</b> api pod → CoreDNS lookup → Postgres Service → Postgres pod.</li>
+      <li><b>NetworkPolicy</b> is enforced by the <b>CNI</b>, not the apiserver — no CNI support = silently ignored.</li>
+    </ol>
+    <div class="diagram" id="c4"></div>
+  </section>
+
+  <section id="d5">
+    <div class="tag">Diagram 5 · Storage</div>
+    <h2>Dynamic persistent storage for a StatefulSet</h2>
+    <ol class="flow">
+      <li><b>①–③</b> StatefulSet’s volumeClaimTemplate creates a PVC that references a StorageClass.</li>
+      <li><b>④–⑥</b> CSI controller calls the cloud API, an EBS volume is created, a PV is auto-made and bound.</li>
+      <li><b>⑦–⑧</b> CSI node plugin attaches + mounts the disk into the pod; data survives reschedules.</li>
+    </ol>
+    <div class="diagram" id="c5"></div>
+  </section>
+
+  <section id="d6">
+    <div class="tag">Diagram 6 · Delivery</div>
+    <h2>CI/CD + GitOps — from <code>git push</code> to running pods</h2>
+    <ol class="flow">
+      <li><b>①–⑥</b> build (Docker) → test → scan → sign → push to registry.</li>
+      <li><b>⑦–⑧</b> CI bumps the image tag in the <b>config repo</b> (a PR) — it never <code>kubectl apply</code>s to prod.</li>
+      <li><b>⑨–⑫</b> Argo CD detects the drift, applies via apiserver, admission verifies the signature, rolling update.</li>
+      <li><b>Rollback</b> = a git revert; Argo re-syncs to the last known-good tag.</li>
+    </ol>
+    <div class="diagram" id="c6"></div>
+  </section>
+
+  <section id="d7">
+    <div class="tag">Diagram 7 · Elasticity</div>
+    <h2>Autoscaling + observability — how the cluster reacts to load</h2>
+    <ol class="flow">
+      <li><b>①–④</b> cAdvisor → metrics-server → HPA computes desired replicas → Deployment scales pods up.</li>
+      <li><b>Ⓐ–Ⓒ</b> if pods don’t fit, they go Pending → Cluster Autoscaler/Karpenter adds a node.</li>
+      <li><b>ⓧ–ⓩ</b> exporters → Prometheus (history) → Grafana + Alertmanager → PagerDuty; alert on symptoms.</li>
+    </ol>
+    <div class="diagram" id="c7"></div>
+  </section>
+
+  <div class="foot">
+    <b>Source & import.</b> Each diagram also lives as a standalone <code>.mmd</code> file in <code>diagrams/</code> — paste one into <a href="https://mermaid.live" target="_blank" rel="noopener">mermaid.live</a>, the VS Code “Markdown Preview Mermaid” extension, or import into Eraser/Excalidraw. This HTML file is the richest view because hover-tooltips are guaranteed here. Rendered with Mermaid v11 (loaded from CDN — needs internet on first open).
+  </div>
+</div>
+
+<script>
+  // ---- tooltip callback: mermaid calls this on click; the hover tooltip is the trailing string ----
+  window.t = function(){ /* no-op: we only want the hover tooltip */ };
+
+  function toggleTheme(){
+    const cur = document.documentElement.getAttribute('data-theme');
+    const next = cur === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('k8smap-theme', next);
+    location.reload(); // re-render mermaid with the matching theme
+  }
+  (function initTheme(){
+    const saved = localStorage.getItem('k8smap-theme');
+    const dark = saved ? saved === 'dark'
+      : window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  })();
+</script>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+
+  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  mermaid.initialize({
+    startOnLoad:false,
+    securityLevel:'loose',            // required so click/tooltip binding works
+    theme: dark ? 'dark' : 'default',
+    flowchart:{ htmlLabels:true, curve:'basis', nodeSpacing:45, rankSpacing:55, useMaxWidth:false }
+  });
+
+  const D = {};
+
+  D.c1 = String.raw`
+flowchart TB
+  subgraph USERS["👥 Users & Clients"]
+    EU["End Users<br/>browser / mobile app"]
+    DEV["Developers<br/>git push + kubectl"]
+    OPS["Platform / DevOps team"]
+  end
+  subgraph SUPPLY["🏗️ Image Supply Chain (CI/CD) — build happens OUTSIDE the cluster"]
+    GIT["App Git Repo<br/>code + Dockerfile"]
+    CI["CI Runner<br/>GitHub Actions"]
+    DOCKER["Docker / BuildKit<br/>docker build → OCI image"]
+    SCAN["Trivy<br/>vulnerability scan"]
+    SIGN["cosign<br/>sign image digest"]
+    REG["Container Registry<br/>AWS ECR"]
+    CONFREPO["Config Repo<br/>Helm charts / manifests"]
+    ARGO["Argo CD<br/>GitOps sync controller"]
+  end
+  subgraph CLOUD["☁️ Cloud Provider (AWS)"]
+    ROUTE["Route 53<br/>DNS"]
+    ELB["Load Balancer<br/>AWS NLB/ALB"]
+    EBS["EBS<br/>block volumes"]
+    KMS["KMS / IAM<br/>keys + identity"]
+  end
+  subgraph CP["🧠 CONTROL PLANE (managed by EKS)"]
+    API["kube-apiserver<br/>the single front door"]
+    ETCD[("etcd<br/>cluster state store")]
+    SCHED["kube-scheduler"]
+    CM["kube-controller-manager"]
+    CCM["cloud-controller-manager"]
+  end
+  subgraph ADDON["🧩 Cluster Add-ons (run as Pods in kube-system)"]
+    COREDNS["CoreDNS<br/>service discovery"]
+    CNI["CNI plugin<br/>Calico / Cilium"]
+    INGCTL["Ingress Controller<br/>ingress-nginx"]
+    METRICS["metrics-server"]
+    PROM["Prometheus + Grafana"]
+    CSICTL["EBS CSI Controller"]
+    ESO["External Secrets Operator"]
+    CA["Cluster Autoscaler / Karpenter"]
+  end
+  subgraph NODES["🖥️ WORKER NODES (EC2 instances)"]
+    direction LR
+    subgraph N1["Node 1"]
+      KUBELET1["kubelet"]
+      PROXY1["kube-proxy"]
+      CRI1["containerd (CRI)"]
+      FE["frontend Pod<br/>(Deployment)"]
+      APIP["api Pod<br/>(Deployment)"]
+    end
+    subgraph N2["Node 2"]
+      KUBELET2["kubelet"]
+      PROXY2["kube-proxy"]
+      CRI2["containerd (CRI)"]
+      REDIS["redis Pod<br/>(Deployment)"]
+      PG["postgres Pod<br/>(StatefulSet)"]
+    end
+  end
+  DEV --> GIT
+  GIT --> CI --> DOCKER --> SCAN --> SIGN --> REG
+  CI --> CONFREPO
+  CONFREPO -.watches.-> ARGO
+  ARGO -.applies manifests.-> API
+  API <-->|read/write state| ETCD
+  SCHED -.watch unscheduled pods.-> API
+  CM -.watch + reconcile.-> API
+  CCM -.node/LB/volume lifecycle.-> API
+  CCM --> ELB
+  CCM --> EBS
+  KUBELET1 -.watch pods + report status.-> API
+  KUBELET2 -.watch pods + report status.-> API
+  PROXY1 -.watch Services/EndpointSlices.-> API
+  PROXY2 -.watch Services/EndpointSlices.-> API
+  CRI1 -->|pull image| REG
+  CRI2 -->|pull image| REG
+  INGCTL -.watch Ingress.-> API
+  COREDNS -.watch Services.-> API
+  METRICS -.scrape kubelets.-> KUBELET1
+  CSICTL -.provision volumes.-> API
+  CSICTL --> EBS
+  ESO --> KMS
+  CA -.watch pending pods.-> API
+  PROM -.scrape /metrics.-> APIP
+  EU -->|1 resolve DNS| ROUTE
+  ROUTE -->|2 A record| ELB
+  ELB -->|3 to node port| INGCTL
+  INGCTL -->|4 route host/path| FE
+  FE -->|5 call API service| APIP
+  APIP -->|6 cache| REDIS
+  APIP -->|7 query DB| PG
+  PG -->|persist| EBS
+  KUBELET1 --> CRI1
+  KUBELET2 --> CRI2
+  CRI1 --> FE
+  CRI1 --> APIP
+  CRI2 --> REDIS
+  CRI2 --> PG
+  CNI -.assign pod IPs.-> N1
+  CNI -.assign pod IPs.-> N2
+  OPS --> PROM
+  OPS -->|kubectl| API
+  click EU t "End users hitting the app over HTTPS. They never touch Kubernetes directly — only the app exposed through a LoadBalancer/Ingress."
+  click DEV t "Developers push code to Git and use kubectl for ad-hoc inspection. In GitOps they do NOT kubectl apply to prod — Argo CD does."
+  click OPS t "Platform/DevOps team: owns cluster health, dashboards, on-call. Interacts via kubectl + Grafana/Prometheus."
+  click GIT t "Source repo holding application code and the Dockerfile. A git push is the trigger for the whole pipeline."
+  click CI t "CI runner (GitHub Actions/GitLab CI). Orchestrates build → test → scan → sign → push, then bumps the image tag in the config repo."
+  click DOCKER t "Docker/BuildKit builds an OCI image from the Dockerfile. IMPORTANT: Docker is a BUILD tool here — the cluster does NOT run Docker; it runs containerd. Same OCI format, so images are interchangeable."
+  click SCAN t "Trivy scans the built image for known CVEs before it is allowed near production."
+  click SIGN t "cosign cryptographically signs the image digest (Sigstore). Admission policy in-cluster later verifies this signature."
+  click REG t "Container registry (AWS ECR). Stores versioned, immutable image layers. Nodes pull FROM here; they never build."
+  click CONFREPO t "Separate Git repo holding K8s manifests / Helm values — the single source of truth for desired cluster state in GitOps."
+  click ARGO t "Argo CD continuously compares the config repo (desired) against live cluster state (actual) and reconciles drift by applying via the API server."
+  click ROUTE t "AWS Route 53 resolves shopfast.com to the cloud load balancer's address."
+  click ELB t "Cloud L4/L7 load balancer. Provisioned automatically by the cloud-controller-manager for a Service type=LoadBalancer or an Ingress."
+  click EBS t "AWS EBS network block storage. Backs PersistentVolumes for stateful workloads like Postgres, attached to whichever node the pod lands on."
+  click KMS t "AWS KMS + IAM: encryption keys and cloud identity. Used for etcd encryption-at-rest, secrets, and IRSA pod identity."
+  click API t "kube-apiserver: the ONLY component that talks to etcd and the ONLY thing every other component communicates through. authN → authZ (RBAC) → admission → validation → persist. The hub of the whole system."
+  click ETCD t "etcd: distributed, Raft-consensus key-value store holding ALL cluster state (every object's spec + status). Lose etcd = lose the cluster. Back it up."
+  click SCHED t "kube-scheduler watches for Pods with no node assigned, filters nodes that fit, scores the survivors, and binds the pod to the best one."
+  click CM t "kube-controller-manager runs the built-in reconcile loops: Deployment, ReplicaSet, Node, Job, EndpointSlice, etc. Each drives actual state toward desired state."
+  click CCM t "cloud-controller-manager integrates K8s with the cloud API: provisions load balancers, attaches volumes, manages node lifecycle."
+  click COREDNS t "CoreDNS is the in-cluster DNS server. Resolves names like postgres.shop.svc.cluster.local to a Service's ClusterIP. Runs as Pods."
+  click CNI t "CNI plugin (Calico/Cilium) wires up pod networking: creates the veth pair, assigns each pod an IP (IPAM), and enforces NetworkPolicy. Called by kubelet at pod creation."
+  click INGCTL t "Ingress Controller (nginx) is a reverse proxy running as Pods. Turns Ingress objects into live host/path routing + TLS termination."
+  click METRICS t "metrics-server aggregates CPU/memory from each kubelet's cAdvisor. Powers 'kubectl top' and the HPA. No history — point-in-time only."
+  click PROM t "Prometheus scrapes /metrics endpoints and stores time series; Grafana visualizes them. The real observability backbone (history, alerting, custom metrics)."
+  click CSICTL t "EBS CSI driver: the Container Storage Interface implementation that dynamically provisions and attaches AWS EBS volumes when a PVC is created."
+  click ESO t "External Secrets Operator syncs secrets from AWS Secrets Manager/Vault into native K8s Secrets, so secrets aren't committed to Git."
+  click CA t "Cluster Autoscaler / Karpenter adds worker nodes when Pods are stuck Pending for lack of capacity, and removes underused nodes to save cost."
+  click KUBELET1 t "kubelet: the node agent. Watches the apiserver for Pods assigned to its node, tells the CRI runtime to start containers, runs probes, reports status back."
+  click KUBELET2 t "kubelet: the node agent. Watches the apiserver for Pods assigned to its node, tells the CRI runtime to start containers, runs probes, reports status back."
+  click PROXY1 t "kube-proxy programs the node's iptables/IPVS rules so traffic to a Service's virtual ClusterIP is load-balanced (DNAT'd) to a healthy backend Pod."
+  click PROXY2 t "kube-proxy programs the node's iptables/IPVS rules so traffic to a Service's virtual ClusterIP is load-balanced (DNAT'd) to a healthy backend Pod."
+  click CRI1 t "containerd is the CRI runtime: pulls images, creates the pod sandbox, runs containers. This is what replaced Docker/dockershim in K8s 1.24+."
+  click CRI2 t "containerd is the CRI runtime: pulls images, creates the pod sandbox, runs containers. This is what replaced Docker/dockershim in K8s 1.24+."
+  click FE t "frontend Pod (managed by a Deployment). Stateless web tier — safely scaled and rescheduled to any node."
+  click APIP t "api Pod (managed by a Deployment). Stateless backend logic. Talks to Redis and Postgres via their Services."
+  click REDIS t "redis Pod: in-memory cache. Here a Deployment; production caches often use a StatefulSet or managed service."
+  click PG t "postgres Pod (managed by a StatefulSet). Stable network identity + its own PersistentVolume on EBS so data survives reschedules."
+`;
+
+  D.c2 = String.raw`
+flowchart TB
+  KUBECTL["kubectl apply<br/>Deployment (replicas: 3)"]
+  subgraph CP["🧠 Control Plane"]
+    AUTH["① AuthN + ② AuthZ (RBAC)"]
+    ADM["③ Admission control<br/>mutating → validating webhooks"]
+    API["④ kube-apiserver<br/>validate + persist"]
+    ETCD[("⑤ etcd<br/>Deployment object stored")]
+    DC["⑥ Deployment controller"]
+    RSC["⑦ ReplicaSet controller"]
+    SCHED["⑨ kube-scheduler"]
+  end
+  subgraph NODE["🖥️ Worker Node"]
+    KUBELET["⑩ kubelet"]
+    CRI["⑪ containerd (CRI)"]
+    POD["⑫ Pod Running<br/>status → apiserver → etcd"]
+  end
+  REG[("Container Registry")]
+  KUBECTL -->|HTTPS request| AUTH
+  AUTH --> ADM
+  ADM --> API
+  API <--> ETCD
+  ETCD -.watch event.-> DC
+  DC -->|creates ReplicaSet| API
+  API -.watch event.-> RSC
+  RSC -->|⑧ creates 3 Pods<br/>Pending, no node| API
+  API -.watch unscheduled pods.-> SCHED
+  SCHED -->|bind pod → node| API
+  API -.watch pods on my node.-> KUBELET
+  KUBELET --> CRI
+  CRI -->|pull image| REG
+  CRI --> POD
+  POD -.status report.-> KUBELET
+  KUBELET -.PodStatus.-> API
+  click KUBECTL t "You declare DESIRED state (3 replicas). You never say 'start container #2' — you say what should exist and the system converges."
+  click AUTH t "AuthN: who are you? (cert/token/OIDC). AuthZ: are you allowed to create a Deployment here? (RBAC Role/RoleBinding)."
+  click ADM t "Admission runs after authz. Mutating webhooks inject sidecars/defaults; validating webhooks (Pod Security, Kyverno) can reject the object."
+  click API t "apiserver validates against the schema and writes to etcd. Only now does the object 'exist'. It returns 200 to kubectl."
+  click ETCD t "The Deployment spec is durably stored. etcd emits a watch event to every controller subscribed to Deployments."
+  click DC t "The Deployment controller sees a new Deployment with no matching ReplicaSet and creates one (encoding the rollout strategy)."
+  click RSC t "The ReplicaSet controller sees it wants 3 replicas but 0 pods exist, so it creates 3 Pod objects."
+  click SCHED t "Pods start Pending with no node. The scheduler filters+scores nodes and writes the chosen node into spec.nodeName (a Bind)."
+  click KUBELET t "The kubelet on the chosen node was watching for pods bound to it. It now makes the pod real."
+  click CRI t "kubelet calls containerd over CRI to pull the image, create the sandbox, and start containers."
+  click REG t "containerd pulls image layers from the registry (cached after first pull)."
+  click POD t "Containers start, probes pass, kubelet reports Running/Ready — status flows back to apiserver and etcd. Actual now matches desired."
+`;
+
+  D.c3 = String.raw`
+flowchart TB
+  subgraph SCHEDULING["🧠 Scheduling decision (kube-scheduler)"]
+    P0["Pod: Pending<br/>spec.nodeName = empty"]
+    FILTER["① Filter / Predicates<br/>drop nodes that don't fit:<br/>resources, taints, nodeSelector,<br/>affinity, volume topology"]
+    SCORE["② Score / Priorities<br/>rank survivors:<br/>least/most allocated,<br/>spread, affinity weight"]
+    BIND["③ Bind<br/>write spec.nodeName = node-2"]
+  end
+  subgraph BUILD["🏗️ Earlier: image was BUILT (not on the cluster)"]
+    DFILE["Dockerfile"]
+    DOCK["docker build<br/>(Docker/BuildKit)"]
+    OCI["OCI image"]
+    REG[("Registry (ECR)")]
+    DFILE --> DOCK --> OCI --> REG
+  end
+  subgraph NODE["🖥️ node-2 — kubelet makes the pod real"]
+    KUBELET["④ kubelet notices pod<br/>bound to this node"]
+    PULL["⑤ containerd pulls image<br/>from registry"]
+    SANDBOX["⑥ create Pod sandbox<br/>('pause' container holds<br/>the network namespace)"]
+    CNIADD["⑦ CNI ADD<br/>veth pair + assign IP (IPAM)<br/>+ program NetworkPolicy"]
+    INIT["⑧ run initContainers<br/>in order, to completion"]
+    APPC["⑨ start app containers<br/>+ postStart hook"]
+    PROBES["⑩ startup → readiness<br/>→ liveness probes"]
+    READY["⑪ Pod Ready<br/>added to EndpointSlice"]
+  end
+  P0 --> FILTER --> SCORE --> BIND
+  BIND -.->|sets nodeName| KUBELET
+  KUBELET --> PULL
+  PULL --> REG
+  PULL --> SANDBOX --> CNIADD --> INIT --> APPC --> PROBES --> READY
+  click P0 t "A fresh Pod has no node. It sits Pending until scheduled. Stuck Pending = no node passed filtering (resources/taints/affinity)."
+  click FILTER t "Filtering removes every node that CANNOT run the pod: too little CPU/mem, an untolerated taint, nodeSelector mismatch, affinity rules, volume zone constraints."
+  click SCORE t "Scoring ranks the survivors. Default favors balanced spread; you can bias toward bin-packing (MostAllocated) to save cost."
+  click BIND t "The scheduler starts nothing — it only writes spec.nodeName. That write IS the assignment. The kubelet does the rest."
+  click DFILE t "The Dockerfile defines how the image is built. It lives with the app code."
+  click DOCK t "Docker/BuildKit turns the Dockerfile into an OCI image. Runs in CI, OFF the cluster. K8s never calls Docker to run anything."
+  click OCI t "The Open Container Initiative image format. Because it's a standard, a Docker-built image runs fine under containerd or CRI-O."
+  click REG t "The image is pushed here once and pulled by any node that needs it."
+  click KUBELET t "The kubelet is the only node component talking to the control plane. Everything below happens because it saw a pod assigned to its node."
+  click PULL t "containerd pulls the image. imagePullPolicy decides re-pull vs local cache. Auth/registry failures here = ImagePullBackOff."
+  click SANDBOX t "Before app containers, K8s creates a 'pause' sandbox container owning the pod's network + IPC namespaces. All containers share it — that's why they share one IP and localhost."
+  click CNIADD t "kubelet calls the CNI plugin's ADD: creates a veth pair, assigns the pod an IP from IPAM, installs NetworkPolicy. No CNI = pod stuck ContainerCreating."
+  click INIT t "initContainers run sequentially and must each exit 0 before app containers start. Used for migrations, waiting on deps, fetching config."
+  click APPC t "App containers start in parallel; a postStart hook can run right after. Repeated crashes here → CrashLoopBackOff."
+  click PROBES t "startupProbe gates the others for slow starters; readinessProbe gates traffic; livenessProbe restarts a hung container."
+  click READY t "Once readiness passes, the pod IP is added to the Service EndpointSlice and it receives traffic. Failing readiness keeps it out of rotation without killing it."
+`;
+
+  D.c4 = String.raw`
+flowchart TB
+  USER["🌐 End user<br/>https://shopfast.com"]
+  subgraph EXT["External / Cloud edge"]
+    DNS["① Route 53 DNS"]
+    LB["② Cloud Load Balancer<br/>(NLB/ALB)"]
+  end
+  subgraph CLUSTER["☸️ Cluster"]
+    INGCTL["③ Ingress Controller Pod<br/>(nginx) — host/path routing + TLS"]
+    SVC["④ Service (ClusterIP)<br/>stable virtual IP"]
+    EPS["⑤ EndpointSlice<br/>list of healthy Pod IPs"]
+    KPROXY["⑥ kube-proxy rules<br/>iptables / IPVS — DNAT"]
+    POD1["⑦ frontend Pod A"]
+    POD2["frontend Pod B"]
+    subgraph EASTWEST["East-West: Pod → Pod"]
+      APIPOD["api Pod"]
+      DNS2["Ⓐ CoreDNS<br/>resolve db.svc.cluster.local"]
+      DBSVC["Ⓑ postgres Service"]
+      DBPOD["Ⓒ postgres Pod"]
+    end
+    NETPOL["NetworkPolicy<br/>(enforced by CNI)"]
+  end
+  USER --> DNS --> LB --> INGCTL
+  INGCTL --> SVC
+  SVC -. selects pods by label .-> EPS
+  SVC --> KPROXY
+  KPROXY --> POD1
+  KPROXY --> POD2
+  APIPOD -->|Ⓐ DNS lookup| DNS2
+  DNS2 -->|returns ClusterIP| APIPOD
+  APIPOD -->|Ⓑ connect ClusterIP| DBSVC
+  DBSVC --> DBPOD
+  NETPOL -. allow/deny .-> DBPOD
+  click USER t "The user only knows the public hostname. Everything past the load balancer is invisible to them."
+  click DNS t "Route 53 resolves shopfast.com to the load balancer's public address."
+  click LB t "Cloud LB spreads traffic across nodes. Created automatically by cloud-controller-manager for a LoadBalancer Service or an Ingress."
+  click INGCTL t "The Ingress Controller is a reverse proxy (nginx) running as Pods. It reads Ingress objects, applies host/path routing, and terminates TLS. Ingress objects alone do nothing without a controller."
+  click SVC t "A Service is a STABLE virtual IP + DNS name in front of a changing set of pods. Pods die and get new IPs; the Service IP never changes."
+  click EPS t "EndpointSlices are the live list of Ready Pod IPs backing a Service. Empty EndpointSlice = 'service has no endpoints' = 503."
+  click KPROXY t "kube-proxy turns the virtual Service IP into real routing via iptables (O(n) rules) or IPVS (hash table, scales better). It DNATs to a chosen backend Pod IP."
+  click POD1 t "A backend pod. Its IP is ephemeral — that's why clients target the Service, never the pod IP."
+  click POD2 t "Another backend pod. kube-proxy load-balances across all Ready backends."
+  click APIPOD t "Pod-to-pod (east-west): the api pod needs Postgres. It uses the Service DNS name, not a hardcoded IP."
+  click DNS2 t "CoreDNS resolves postgres.shop.svc.cluster.local to the Postgres Service ClusterIP. Every pod's /etc/resolv.conf points here."
+  click DBSVC t "The Postgres Service gives the DB a stable address even when the pod is rescheduled."
+  click DBPOD t "The actual Postgres pod. Traffic arrives via the same kube-proxy DNAT mechanism."
+  click NETPOL t "NetworkPolicy is a pod firewall (e.g. only api pods may reach Postgres:5432). CRITICAL: enforced by the CNI plugin, not the apiserver — with a CNI that doesn't support it, the policy is silently ignored."
+`;
+
+  D.c5 = String.raw`
+flowchart TB
+  subgraph REQUEST["① Workload asks for storage"]
+    STS["StatefulSet: postgres<br/>volumeClaimTemplate: 20Gi"]
+    PVC["② PersistentVolumeClaim<br/>request: 20Gi, RWO,<br/>storageClassName: gp3"]
+  end
+  subgraph MATCH["Control plane"]
+    SC["③ StorageClass 'gp3'<br/>provisioner: ebs.csi.aws.com"]
+    CSICTL["④ CSI Controller<br/>(external-provisioner)"]
+    PV["⑥ PersistentVolume<br/>auto-created + BOUND to PVC"]
+  end
+  subgraph CLOUD["☁️ AWS"]
+    EBS["⑤ EBS volume created<br/>vol-0abc... 20Gi"]
+  end
+  subgraph NODE["🖥️ Node running the pod"]
+    CSINODE["⑦ CSI Node plugin<br/>attach + mount"]
+    POD["⑧ postgres Pod<br/>/var/lib/postgresql/data"]
+  end
+  STS --> PVC
+  PVC -->|references| SC
+  SC --> CSICTL
+  CSICTL -->|CreateVolume| EBS
+  CSICTL --> PV
+  PV <-->|bound 1:1| PVC
+  EBS --> CSINODE
+  CSINODE --> POD
+  PVC -. mounted into .-> POD
+  click STS t "A StatefulSet's volumeClaimTemplate creates ONE PVC per replica (postgres-0, postgres-1...), so each keeps its own stable disk across restarts."
+  click PVC t "A PVC is a REQUEST for storage: size, access mode (RWO = one node at a time), StorageClass. The app's abstraction — it doesn't know about EBS."
+  click SC t "A StorageClass defines HOW to provision: which CSI driver, disk type (gp3/io2), filesystem, reclaim policy. Enables dynamic provisioning."
+  click CSICTL t "The CSI controller watches for unbound PVCs and calls the cloud API to create a real volume. CSI decoupled storage vendors from K8s core."
+  click EBS t "The actual cloud disk, created on demand. Delete-vs-retain on PVC deletion is set by the StorageClass reclaim policy."
+  click PV t "The PersistentVolume is the cluster-side handle to the real disk, auto-created and bound 1:1 to the PVC for the claim's life."
+  click CSINODE t "When the pod is scheduled, the CSI node plugin (a DaemonSet) attaches the EBS volume to that node and mounts it into the pod."
+  click POD t "The pod sees a normal directory. If rescheduled, the PV/EBS volume is detached and reattached on the new node — data persists."
+`;
+
+  D.c6 = String.raw`
+flowchart TB
+  DEV["① Developer<br/>git push"]
+  subgraph CI["🏗️ CI pipeline (outside cluster)"]
+    BUILD["② docker build<br/>image:git-sha (immutable)"]
+    TEST["③ unit + integration tests"]
+    SCAN["④ Trivy scan (CVEs)"]
+    SIGN["⑤ cosign sign digest"]
+    PUSH["⑥ push → registry"]
+    BUMP["⑦ bump image tag in<br/>config repo (open PR)"]
+  end
+  REG[("Registry (ECR)")]
+  CONF["⑧ Config Repo merged<br/>desired state = new tag"]
+  subgraph CD["🚢 GitOps + cluster"]
+    ARGO["⑨ Argo CD detects drift<br/>(git ≠ live)"]
+    API["⑩ kube-apiserver<br/>apply manifests"]
+    ADM["⑪ Admission (Kyverno)<br/>verify signature + policy"]
+    ROLL["⑫ Rolling update<br/>Deployment → new ReplicaSet"]
+    OLD["old pods (v1)"]
+    NEW["new pods (v2)"]
+  end
+  ROLLBACK["Rollback = git revert<br/>Argo re-syncs old tag"]
+  DEV --> BUILD --> TEST --> SCAN --> SIGN --> PUSH --> REG
+  PUSH --> BUMP --> CONF
+  CONF -.watched.-> ARGO
+  ARGO --> API --> ADM --> ROLL
+  ROLL --> NEW
+  ROLL -. scale down .-> OLD
+  ROLLBACK -.-> CONF
+  click DEV t "A single git push is the only manual step. Everything downstream is automated and auditable via Git history."
+  click BUILD t "Docker/BuildKit builds and tags the image with the immutable git SHA — NEVER :latest. Immutable tags make rollbacks deterministic."
+  click TEST t "Automated tests gate the pipeline. A failure stops the image from reaching the registry."
+  click SCAN t "Trivy blocks images with known critical CVEs before deployment."
+  click SIGN t "cosign signs the image digest; the signature is verified at admission inside the cluster, so unsigned images can't run."
+  click PUSH t "The verified, signed image is pushed to the registry — the one artifact the cluster pulls."
+  click BUMP t "CI does NOT kubectl apply to prod. It updates the image tag in the config repo via a PR. Git stays the single source of truth."
+  click REG t "Immutable, content-addressable image storage. Nodes pull by digest for integrity."
+  click CONF t "When the PR merges, the config repo declares the new desired state. This merge is the real 'deploy' trigger."
+  click ARGO t "Argo CD continuously diffs the config repo against the live cluster; on drift it reconciles (auto-sync or after approval)."
+  click API t "Argo applies manifests through the normal apiserver path — same authN/authZ/admission as any client."
+  click ADM t "Admission webhooks (Kyverno/OPA Gatekeeper) enforce policy: verify the cosign signature, require limits, block privileged pods. Supply-chain trust is enforced here."
+  click ROLL t "The Deployment controller creates a new ReplicaSet and shifts pods per maxSurge/maxUnavailable — zero-downtime. Canary/blue-green via Argo Rollouts extends this."
+  click OLD t "Old pods drain only as new ones become Ready, so capacity never drops below the threshold."
+  click NEW t "New pods must pass readiness before receiving traffic and before old pods are removed."
+  click ROLLBACK t "Rollback is just a git revert of the tag bump. Argo re-syncs to the previous good state — fast, auditable, no snowflake fixes."
+`;
+
+  D.c7 = String.raw`
+flowchart TB
+  LOAD["📈 Traffic spike<br/>CPU on api pods rises"]
+  subgraph PODSCALE["Horizontal Pod Autoscaling"]
+    CADV["① cAdvisor in kubelet<br/>measures pod CPU/mem"]
+    MS["② metrics-server<br/>aggregates usage"]
+    HPA["③ HPA controller<br/>desired = ceil(cur × usage/target)"]
+    DEP["④ Deployment replicas ↑<br/>3 → 8"]
+  end
+  subgraph NODESCALE["Cluster / Node Autoscaling"]
+    PENDING["Ⓐ new pods Pending<br/>(no room on nodes)"]
+    CAK["Ⓑ Cluster Autoscaler / Karpenter"]
+    NEWNODE["Ⓒ new EC2 node joins<br/>pods schedule"]
+  end
+  subgraph OBS["Observability pipeline"]
+    APPMET["ⓧ app /metrics<br/>+ kube-state-metrics<br/>+ node-exporter"]
+    PROM["ⓨ Prometheus<br/>scrape + store TSDB"]
+    GRAF["Grafana dashboards"]
+    ALERT["ⓩ Alertmanager<br/>burn-rate / error-rate"]
+    PD["PagerDuty → on-call"]
+  end
+  VPA["VPA (recommend mode)<br/>right-size requests/limits"]
+  LOAD --> CADV --> MS --> HPA --> DEP
+  DEP --> PENDING --> CAK --> NEWNODE
+  APPMET --> PROM --> GRAF
+  PROM --> ALERT --> PD
+  PROM -. custom metrics (RPS, queue) .-> HPA
+  VPA -. sizing advice .-> DEP
+  click LOAD t "Load rises. Capacity should grow at two levels: more pods (HPA) and, if pods don't fit, more nodes (Cluster Autoscaler)."
+  click CADV t "cAdvisor is built into the kubelet and measures per-container CPU/memory from cgroups."
+  click MS t "metrics-server aggregates those numbers cluster-wide. Source for 'kubectl top' and HPA CPU/mem decisions. Keeps NO history."
+  click HPA t "The HPA computes desired replicas = ceil(currentReplicas × currentMetric/targetMetric). Stabilization windows prevent flapping."
+  click DEP t "The HPA edits the Deployment replica count; the ReplicaSet controller creates the extra pods — normal scheduling takes over."
+  click PENDING t "If nodes lack capacity, new pods sit Pending. That Pending state triggers node autoscaling."
+  click CAK t "Cluster Autoscaler/Karpenter sees unschedulable pods and provisions nodes; removes underused ones later. Respects PodDisruptionBudgets on scale-down."
+  click NEWNODE t "A new EC2 node joins, its kubelet registers, and the Pending pods schedule onto it."
+  click APPMET t "Three exporters feed metrics: app /metrics (business + latency), kube-state-metrics (object state), node-exporter (host). You need all three."
+  click PROM t "Prometheus scrapes on an interval and stores time series. Unlike metrics-server it keeps HISTORY — trends, capacity planning, alerting."
+  click GRAF t "Grafana renders Prometheus data as dashboards for humans."
+  click ALERT t "Alertmanager fires on SYMPTOMS (error rate, SLO burn rate, latency), not causes like 'a pod restarted'. Dedups, groups, routes."
+  click PD t "PagerDuty pages on-call. Good alerts are actionable and tied to user impact."
+  click VPA t "VPA recommends right-sized CPU/memory from real usage. Use recommend mode to fix 'set limits high to be safe' waste. Don't run VPA auto + HPA on the same CPU metric — they fight."
+`;
+
+  (async function render(){
+    for (const id of Object.keys(D)){
+      const host = document.getElementById(id);
+      try{
+        const { svg, bindFunctions } = await mermaid.render(id + '_svg', D[id].trim());
+        host.innerHTML = svg;
+        if (bindFunctions) bindFunctions(host);   // wires up hover tooltips + click
+      }catch(err){
+        host.innerHTML = '<div class="err">Diagram failed to render:\n' + (err && err.message ? err.message : err) + '</div>';
+        console.error(id, err);
+      }
+    }
+  })();
+
+  // build the table of contents
+  const toc = document.getElementById('toc');
+  document.querySelectorAll('section').forEach(s=>{
+    const h = s.querySelector('h2').textContent;
+    const tag = s.querySelector('.tag').textContent;
+    const a = document.createElement('a');
+    a.href = '#' + s.id;
+    a.innerHTML = '<b>' + tag.split('·')[0].trim() + '</b> · ' + h;
+    toc.appendChild(a);
+  });
+</script>
+</body>
+</html>

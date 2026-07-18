@@ -84,32 +84,41 @@ This pattern is used everywhere: ReplicaSet controller (ensure N pod replicas ex
 A Kubernetes cluster has two categories of machines: **control plane** nodes (the "brain") and **worker nodes** (where your workloads actually run).
 
 ```
-                         ┌─────────────────────────────────────────────┐
-                         │              CONTROL PLANE                  │
-                         │                                               │
-   kubectl / clients ───▶│  kube-apiserver  ◀────────────────┐          │
-                         │        │  ▲                       │          │
-                         │        ▼  │                       │          │
-                         │      etcd │                       │          │
-                         │           │                       │          │
-                         │  kube-scheduler   kube-controller- │          │
-                         │                    manager          │          │
-                         │                   cloud-controller- │          │
-                         │                    manager (opt.)   │          │
-                         └───────────┬───────────────────────┬┘          │
-                                     │ watch/write via API    │
-              ┌──────────────────────┼──────────────────────┼─────────┐
-              │                      │                      │         │
-        ┌─────▼─────┐          ┌─────▼─────┐          ┌─────▼─────┐
-        │  Node 1    │          │  Node 2    │          │  Node 3    │
-        │ kubelet    │          │ kubelet    │          │ kubelet    │
-        │ kube-proxy │          │ kube-proxy │          │ kube-proxy │
-        │ CRI runtime│          │ CRI runtime│          │ CRI runtime│
-        │ (containerd│          │ (containerd│          │ (containerd│
-        │  /CRI-O)   │          │  /CRI-O)   │          │  /CRI-O)   │
-        │ Pods...    │          │ Pods...    │          │ Pods...    │
-        └────────────┘          └────────────┘          └────────────┘
+┌────────────────┐  ┌─ CONTROL PLANE ──────────────────────────────────────────────────────────────────────────────────────────────┐
+│   kubectl /    │▶─│                                                                                                              │
+│  API clients   │  │                                  ┌────────────────────────────────────────┐                                  │
+└────────────────┘  │                                  │             kube-apiserver             │                                  │
+                     │                                  │     REST · authN/authZ · admission     │                                  │
+                     │                                  │          control · validation          │                                  │
+                     │                                  └────────────────────┬───────────────────┘                                  │
+                     │                             every component below talks ONLY to the API server                               │
+                     │            ┬───────────────────────────┬───────────────────────────┬───────────────────────────┬             │
+                     │            │                           │                           │                           │             │
+                     │┌───────────────────────┐   ┌───────────────────────┐   ┌───────────────────────┐   ┌───────────────────────┐ │
+                     ││         etcd          │   │    kube-scheduler     │   │   kube-controller-    │   │   cloud-controller-   │ │
+                     ││    (cluster state,    │   │   (watches unsched-   │   │        manager        │   │  manager (optional)   │ │
+                     ││    Raft-replicated    │   │   uled pods, picks    │   │  (ReplicaSet, Node,   │   │  (cloud LBs, disks,   │ │
+                     ││       kv store)       │   │        a node)        │   │   Job, Endpoint..)    │   │    node lifecycle)    │ │
+                     │└───────────────────────┘   └───────────────────────┘   └───────────────────────┘   └───────────────────────┘ │
+                     │                                                                                                              │
+                     └──────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+                                                                             │
+                                       watch / write — kubelet & kube-proxy on every node
+                                       talk ONLY to the API server, never to each other
+                                                                             │
+                                         ┬───────────────────────────────────┼───────────────────────────────────┬
+                                         │                                   │                                   │
+                          ┌─ Node 1 ───────────────────┐      ┌─ Node 2 ───────────────────┐      ┌─ Node 3 ───────────────────┐
+                          │          kubelet           │      │          kubelet           │      │          kubelet           │
+                          │         kube-proxy         │      │         kube-proxy         │      │         kube-proxy         │
+                          │  (iptables / IPVS rules)   │      │  (iptables / IPVS rules)   │      │  (iptables / IPVS rules)   │
+                          │        CRI runtime         │      │        CRI runtime         │      │        CRI runtime         │
+                          │    (containerd / CRI-O)    │      │    (containerd / CRI-O)    │      │    (containerd / CRI-O)    │
+                          │       Pod  Pod  Pod        │      │       Pod  Pod  Pod        │      │       Pod  Pod  Pod        │
+                          └────────────────────────────┘      └────────────────────────────┘      └────────────────────────────┘
 ```
+
+**How to read it:** `kube-apiserver` is the hub of the whole system — it's the *only* component that talks to `etcd`, and the *only* component every other piece (scheduler, controller-manager, cloud-controller-manager, kubelet, kube-proxy) ever calls. Nothing calls etcd directly except the API server; nothing commands a kubelet directly except through the API server's watch mechanism. Control plane components watch the API server for objects they care about (unscheduled Pods for the scheduler, Node/Job/ReplicaSet objects for the controller-manager) and write back the results. Nodes are physically separate machines running only `kubelet` + `kube-proxy` + a CRI runtime + your Pods — no control-plane logic runs there at all in a standard setup.
 
 ### 3.1 Control plane components
 
@@ -151,7 +160,7 @@ A Kubernetes cluster has two categories of machines: **control plane** nodes (th
 ### 3.2 Node (worker) components
 
 **kubelet**
-- The agent on every node. Watches the API server for Pods scheduled to its node (`spec.nodeName == <this node>`).
+- The agent on every node. Opens a watch connection to the API server and receives event notifications whenever a Pod is assigned to this node (`spec.nodeName == <this node>`).
 - Ensures the containers described in each Pod spec are actually running, by talking to the local container runtime through the **CRI (Container Runtime Interface)**.
 - Runs **liveness/readiness/startup probes**, reports Pod and Node status back to the API server (`status` subresource), manages volume mounting for pods on its node, and reports node-level resource capacity/allocatable amounts.
 - Also enforces resource limits by configuring cgroups per container based on the Pod's `resources` field.

@@ -1,0 +1,57 @@
+%%{init: {"flowchart": {"htmlLabels": true, "curve": "basis"}} }%%
+flowchart TB
+
+%% =====================================================================
+%% FLOW 2 — What happens when you run `kubectl apply -f deployment.yaml`
+%% Follow the numbers ① → ⑫. This is the desired-state control loop.
+%% =====================================================================
+
+  KUBECTL["kubectl apply<br/>Deployment (replicas: 3)"]
+
+  subgraph CP["🧠 Control Plane"]
+    AUTH["① AuthN + ② AuthZ (RBAC)"]
+    ADM["③ Admission control<br/>mutating → validating webhooks"]
+    API["④ kube-apiserver<br/>validate + persist"]
+    ETCD[("⑤ etcd<br/>Deployment object stored")]
+    DC["⑥ Deployment controller"]
+    RSC["⑦ ReplicaSet controller"]
+    SCHED["⑨ kube-scheduler"]
+  end
+
+  subgraph NODE["🖥️ Worker Node"]
+    KUBELET["⑩ kubelet"]
+    CRI["⑪ containerd (CRI)"]
+    POD["⑫ Pod Running<br/>status → apiserver → etcd"]
+  end
+
+  REG[("Container Registry")]
+
+  KUBECTL -->|HTTPS request| AUTH
+  AUTH --> ADM
+  ADM --> API
+  API <--> ETCD
+  ETCD -.watch event.-> DC
+  DC -->|creates ReplicaSet| API
+  API -.watch event.-> RSC
+  RSC -->|⑧ creates 3 Pod objects<br/>state = Pending, no node| API
+  API -.watch: unscheduled pods.-> SCHED
+  SCHED -->|binds pod → node| API
+  API -.watch: pods on my node.-> KUBELET
+  KUBELET --> CRI
+  CRI -->|pull image| REG
+  CRI --> POD
+  POD -.status report.-> KUBELET
+  KUBELET -.PodStatus.-> API
+
+  click KUBECTL t "You declare DESIRED state (3 replicas). You never say 'start container #2' — you say what should exist and the system converges to it."
+  click AUTH t "AuthN: who are you? (client cert / token / OIDC). AuthZ: are you allowed to create a Deployment in this namespace? (RBAC Role/RoleBinding)."
+  click ADM t "Admission controllers run AFTER authz. Mutating webhooks can inject sidecars/defaults; validating webhooks (e.g. Pod Security, Kyverno) can reject the object."
+  click API t "The apiserver validates the object against its schema and writes it to etcd. Only now does the object 'exist'. It returns 200 to kubectl."
+  click ETCD t "The Deployment spec is durably stored. etcd emits a watch event to every controller subscribed to Deployments."
+  click DC t "The Deployment controller sees a new Deployment with no matching ReplicaSet and creates one (encoding the rollout strategy)."
+  click RSC t "The ReplicaSet controller sees a ReplicaSet wanting 3 replicas but 0 pods exist, so it creates 3 Pod objects."
+  click SCHED t "Pods are created in Pending with no node. The scheduler filters+scores nodes and writes the chosen node into each pod's spec.nodeName (a Bind)."
+  click KUBELET t "The kubelet on the chosen node was watching for pods bound to it. It now acts to make the pod real."
+  click CRI t "kubelet calls containerd over the CRI API to pull the image, create the sandbox, and start the containers."
+  click REG t "containerd pulls the image layers from the registry (cached locally after the first pull)."
+  click POD t "Containers start, probes pass, kubelet reports Running/Ready. That status flows back up to the apiserver and into etcd — actual state now matches desired."
