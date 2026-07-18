@@ -1,0 +1,167 @@
+%%{init: {"flowchart": {"htmlLabels": true, "curve": "basis"}, "themeVariables": {"fontSize": "14px"}} }%%
+flowchart TB
+
+%% =====================================================================
+%% MASTER ARCHITECTURE — "ShopFast" e-commerce company running on AWS EKS
+%% Solid arrows = live data/traffic path.  Dotted arrows = watch/control.
+%% =====================================================================
+
+  subgraph USERS["👥 Users & Clients"]
+    EU["End Users<br/>browser / mobile app"]
+    DEV["Developers<br/>git push + kubectl"]
+    OPS["Platform / DevOps team"]
+  end
+
+  subgraph SUPPLY["🏗️ Image Supply Chain (CI/CD) — build happens OUTSIDE the cluster"]
+    GIT["App Git Repo<br/>code + Dockerfile"]
+    CI["CI Runner<br/>GitHub Actions"]
+    DOCKER["Docker / BuildKit<br/>docker build → OCI image"]
+    SCAN["Trivy<br/>vulnerability scan"]
+    SIGN["cosign<br/>sign image digest"]
+    REG["Container Registry<br/>AWS ECR"]
+    CONFREPO["Config Repo<br/>Helm charts / manifests"]
+    ARGO["Argo CD<br/>GitOps sync controller"]
+  end
+
+  subgraph CLOUD["☁️ Cloud Provider (AWS)"]
+    ROUTE["Route 53<br/>DNS"]
+    ELB["Load Balancer<br/>AWS NLB/ALB"]
+    EBS["EBS<br/>block volumes"]
+    KMS["KMS / IAM<br/>keys + identity"]
+  end
+
+  subgraph CP["🧠 CONTROL PLANE (managed by EKS)"]
+    API["kube-apiserver<br/>the single front door"]
+    ETCD[("etcd<br/>cluster state store")]
+    SCHED["kube-scheduler"]
+    CM["kube-controller-manager"]
+    CCM["cloud-controller-manager"]
+  end
+
+  subgraph ADDON["🧩 Cluster Add-ons (run as Pods in kube-system)"]
+    COREDNS["CoreDNS<br/>service discovery"]
+    CNI["CNI plugin<br/>Calico / Cilium"]
+    INGCTL["Ingress Controller<br/>ingress-nginx"]
+    METRICS["metrics-server"]
+    PROM["Prometheus + Grafana"]
+    CSICTL["EBS CSI Controller"]
+    ESO["External Secrets Operator"]
+    CA["Cluster Autoscaler / Karpenter"]
+  end
+
+  subgraph NODES["🖥️ WORKER NODES (EC2 instances)"]
+    direction LR
+    subgraph N1["Node 1"]
+      KUBELET1["kubelet"]
+      PROXY1["kube-proxy"]
+      CRI1["containerd (CRI)"]
+      FE["frontend Pod<br/>(Deployment)"]
+      APIP["api Pod<br/>(Deployment)"]
+    end
+    subgraph N2["Node 2"]
+      KUBELET2["kubelet"]
+      PROXY2["kube-proxy"]
+      CRI2["containerd (CRI)"]
+      REDIS["redis Pod<br/>(Deployment)"]
+      PG["postgres Pod<br/>(StatefulSet)"]
+    end
+  end
+
+%% ---- Supply chain flow ----
+  DEV --> GIT
+  GIT --> CI --> DOCKER --> SCAN --> SIGN --> REG
+  CI --> CONFREPO
+  CONFREPO -.watches.-> ARGO
+  ARGO -.applies manifests.-> API
+
+%% ---- Control plane internal wiring ----
+  API <-->|read/write state| ETCD
+  SCHED -.watch unscheduled pods.-> API
+  CM -.watch + reconcile.-> API
+  CCM -.node/LB/volume lifecycle.-> API
+  CCM --> ELB
+  CCM --> EBS
+
+%% ---- Node <-> control plane ----
+  KUBELET1 -.watch pods + report status.-> API
+  KUBELET2 -.watch pods + report status.-> API
+  PROXY1 -.watch Services/EndpointSlices.-> API
+  PROXY2 -.watch Services/EndpointSlices.-> API
+
+%% ---- Image pull ----
+  CRI1 -->|pull image| REG
+  CRI2 -->|pull image| REG
+
+%% ---- Add-ons control wiring ----
+  INGCTL -.watch Ingress.-> API
+  COREDNS -.watch Services.-> API
+  METRICS -.scrape kubelets.-> KUBELET1
+  CSICTL -.provision volumes.-> API
+  CSICTL --> EBS
+  ESO --> KMS
+  CA -.watch pending pods.-> API
+  PROM -.scrape /metrics.-> APIP
+
+%% ---- Live user traffic path ----
+  EU -->|1 resolve DNS| ROUTE
+  ROUTE -->|2 A record| ELB
+  ELB -->|3 to node port| INGCTL
+  INGCTL -->|4 route host/path| FE
+  FE -->|5 call API service| APIP
+  APIP -->|6 cache| REDIS
+  APIP -->|7 query DB| PG
+  PG -->|persist| EBS
+
+%% ---- kubelet manages runtime ----
+  KUBELET1 --> CRI1
+  KUBELET2 --> CRI2
+  CRI1 --> FE
+  CRI1 --> APIP
+  CRI2 --> REDIS
+  CRI2 --> PG
+  CNI -.assign pod IPs.-> N1
+  CNI -.assign pod IPs.-> N2
+
+%% ---- Ops ----
+  OPS --> PROM
+  OPS -->|kubectl| API
+
+%% ========================= TOOLTIPS =========================
+click EU t "End users hitting the app over HTTPS. They never touch Kubernetes directly — only the app exposed through a LoadBalancer/Ingress."
+click DEV t "Developers push code to Git and use kubectl for ad-hoc inspection. In GitOps they do NOT kubectl apply to prod — Argo CD does."
+click OPS t "Platform/DevOps team: owns cluster health, dashboards, on-call. Interacts via kubectl + Grafana/Prometheus."
+click GIT t "Source repo holding application code and the Dockerfile. A git push is the trigger for the whole pipeline."
+click CI t "CI runner (GitHub Actions/GitLab CI). Orchestrates build → test → scan → sign → push, then bumps the image tag in the config repo."
+click DOCKER t "Docker/BuildKit builds an OCI image from the Dockerfile. IMPORTANT: Docker is a BUILD tool here — the cluster does NOT run Docker; it runs containerd. Same OCI image format, so images are interchangeable."
+click SCAN t "Trivy scans the built image for known CVEs in OS packages and app dependencies before it is allowed near production."
+click SIGN t "cosign cryptographically signs the image digest (Sigstore). Admission policy in-cluster later verifies this signature."
+click REG t "Container registry (AWS ECR/Docker Hub). Stores versioned, immutable image layers. Nodes pull FROM here; they never build."
+click CONFREPO t "Separate Git repo holding Kubernetes manifests / Helm values — the single source of truth for desired cluster state in GitOps."
+click ARGO t "Argo CD continuously compares the config repo (desired) against live cluster state (actual) and reconciles drift by applying via the API server."
+click ROUTE t "AWS Route 53 resolves shopfast.com to the cloud load balancer's address."
+click ELB t "Cloud L4/L7 load balancer. Provisioned automatically by the cloud-controller-manager when you create a Service type=LoadBalancer or an Ingress."
+click EBS t "AWS EBS network block storage. Backs PersistentVolumes for stateful workloads like Postgres, attached to whichever node the pod lands on."
+click KMS t "AWS KMS + IAM: encryption keys and cloud identity. Used for etcd encryption-at-rest, secrets, and IRSA pod identity."
+click API t "kube-apiserver: the ONLY component that talks to etcd and the ONLY thing every other component communicates through. Does authN → authZ (RBAC) → admission → validation → persist. The hub of the whole system."
+click ETCD t "etcd: distributed, Raft-consensus key-value store holding ALL cluster state (every object's spec + status). Lose etcd = lose the cluster. Back it up."
+click SCHED t "kube-scheduler watches for Pods with no node assigned, filters nodes that fit (resources/taints/affinity), scores the survivors, and binds the pod to the best one."
+click CM t "kube-controller-manager runs the built-in reconcile loops: Deployment, ReplicaSet, Node, Job, EndpointSlice, etc. Each drives actual state toward desired state."
+click CCM t "cloud-controller-manager integrates K8s with the cloud API: provisions load balancers, attaches volumes, and manages node lifecycle in the cloud."
+click COREDNS t "CoreDNS is the in-cluster DNS server. Resolves names like postgres.shop.svc.cluster.local to a Service's ClusterIP. Runs as Pods."
+click CNI t "CNI plugin (Calico/Cilium) wires up pod networking: creates the veth pair, assigns each pod an IP (IPAM), and enforces NetworkPolicy. Called by kubelet at pod creation."
+click INGCTL t "Ingress Controller (nginx) is a reverse proxy running as Pods. Watches Ingress objects and turns host/path rules into live routing + TLS termination."
+click METRICS t "metrics-server aggregates CPU/memory from each kubelet's cAdvisor. Powers 'kubectl top' and the Horizontal Pod Autoscaler. No history — point-in-time only."
+click PROM t "Prometheus scrapes /metrics endpoints and stores time series; Grafana visualizes them. The real observability backbone (history, alerting, custom metrics)."
+click CSICTL t "EBS CSI driver: the Container Storage Interface implementation that dynamically provisions and attaches AWS EBS volumes when a PVC is created."
+click ESO t "External Secrets Operator syncs secrets from an external store (AWS Secrets Manager/Vault) into native K8s Secrets, so secrets aren't committed to Git."
+click CA t "Cluster Autoscaler / Karpenter adds worker nodes when Pods are stuck Pending for lack of capacity, and removes underused nodes to save cost."
+click KUBELET1 t "kubelet: the node agent. Watches the API server for Pods assigned to its node, tells the CRI runtime to start containers, runs probes, and reports status back."
+click KUBELET2 t "kubelet: the node agent. Watches the API server for Pods assigned to its node, tells the CRI runtime to start containers, runs probes, and reports status back."
+click PROXY1 t "kube-proxy programs the node's iptables/IPVS rules so that traffic to a Service's virtual ClusterIP is load-balanced (DNAT'd) to a healthy backend Pod."
+click PROXY2 t "kube-proxy programs the node's iptables/IPVS rules so that traffic to a Service's virtual ClusterIP is load-balanced (DNAT'd) to a healthy backend Pod."
+click CRI1 t "containerd is the CRI (Container Runtime Interface) runtime. It pulls images, creates the pod sandbox, and runs containers. This is what replaced Docker/dockershim in K8s 1.24+."
+click CRI2 t "containerd is the CRI (Container Runtime Interface) runtime. It pulls images, creates the pod sandbox, and runs containers. This is what replaced Docker/dockershim in K8s 1.24+."
+click FE t "frontend Pod (managed by a Deployment). Stateless web tier — safely scaled up/down and rescheduled to any node."
+click APIP t "api Pod (managed by a Deployment). Stateless backend business logic. Talks to Redis and Postgres via their Services."
+click REDIS t "redis Pod: in-memory cache. Here a Deployment; production caches often use a StatefulSet or managed service."
+click PG t "postgres Pod (managed by a StatefulSet). Stable network identity + its own PersistentVolume on EBS so data survives reschedules."

@@ -1,0 +1,46 @@
+%%{init: {"flowchart": {"htmlLabels": true, "curve": "basis"}} }%%
+flowchart TB
+
+%% =====================================================================
+%% FLOW 5 — Dynamic persistent storage: how a StatefulSet gets a disk.
+%% Follow ① → ⑧. Example: Postgres needs a durable 20Gi volume.
+%% =====================================================================
+
+  subgraph REQUEST["① Workload asks for storage"]
+    STS["StatefulSet: postgres<br/>volumeClaimTemplate: 20Gi"]
+    PVC["② PersistentVolumeClaim<br/>request: 20Gi, RWO,<br/>storageClassName: gp3"]
+  end
+
+  subgraph MATCH["Control plane"]
+    SC["③ StorageClass 'gp3'<br/>provisioner: ebs.csi.aws.com"]
+    CSICTL["④ CSI Controller<br/>(external-provisioner)"]
+    PV["⑥ PersistentVolume<br/>auto-created + BOUND to PVC"]
+  end
+
+  subgraph CLOUD["☁️ AWS"]
+    EBS["⑤ EBS volume created<br/>vol-0abc... 20Gi"]
+  end
+
+  subgraph NODE["🖥️ Node running the pod"]
+    CSINODE["⑦ CSI Node plugin<br/>attach + mount"]
+    POD["⑧ postgres Pod<br/>/var/lib/postgresql/data"]
+  end
+
+  STS --> PVC
+  PVC -->|references| SC
+  SC --> CSICTL
+  CSICTL -->|CreateVolume| EBS
+  CSICTL --> PV
+  PV <-->|bound 1:1| PVC
+  EBS --> CSINODE
+  CSINODE --> POD
+  PVC -. mounted into .-> POD
+
+  click STS t "A StatefulSet's volumeClaimTemplate creates ONE PVC per replica (postgres-0, postgres-1...), so each replica keeps its own stable disk across restarts and reschedules."
+  click PVC t "A PersistentVolumeClaim is a REQUEST for storage: how big, which access mode (RWO = one node at a time), which StorageClass. It's the app's abstraction — it doesn't know about EBS."
+  click SC t "A StorageClass defines HOW to provision storage: which CSI driver, disk type (gp3/io2), filesystem, and reclaim policy. Enables dynamic provisioning so admins don't pre-create PVs by hand."
+  click CSICTL t "The CSI (Container Storage Interface) controller watches for unbound PVCs and calls the cloud API to create a real volume. CSI is the pluggable standard that decoupled storage vendors from K8s core."
+  click EBS t "The actual cloud disk is created on demand. Its lifecycle (delete vs retain when the PVC is deleted) is governed by the StorageClass reclaim policy."
+  click PV t "The PersistentVolume is the cluster-side handle to the real disk. It is auto-created and bound 1:1 to the PVC. Binding is permanent for that claim's life."
+  click CSINODE t "When the pod is scheduled, the CSI node plugin (a DaemonSet) attaches the EBS volume to that EC2 node and mounts it into the pod. RWO means the volume follows the pod but only one node at a time."
+  click POD t "The pod sees a normal directory. If the pod is rescheduled to another node, the same PV/EBS volume is detached and reattached there — data persists."

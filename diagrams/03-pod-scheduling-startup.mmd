@@ -1,0 +1,56 @@
+%%{init: {"flowchart": {"htmlLabels": true, "curve": "basis"}} }%%
+flowchart TB
+
+%% =====================================================================
+%% FLOW 3 — Pod scheduling decision + container startup on the node.
+%% Shows the exact Docker-vs-containerd relationship and CNI networking.
+%% =====================================================================
+
+  subgraph SCHEDULING["🧠 Scheduling decision (kube-scheduler)"]
+    P0["Pod: Pending<br/>spec.nodeName = empty"]
+    FILTER["① Filter / Predicates<br/>drop nodes that don't fit:<br/>resources, taints, nodeSelector,<br/>affinity, volume topology"]
+    SCORE["② Score / Priorities<br/>rank survivors:<br/>least/most allocated,<br/>spread, affinity weight"]
+    BIND["③ Bind<br/>write spec.nodeName = node-2"]
+  end
+
+  subgraph BUILD["🏗️ Earlier: image was BUILT (not on the cluster)"]
+    DFILE["Dockerfile"]
+    DOCK["docker build<br/>(Docker/BuildKit)"]
+    OCI["OCI image"]
+    REG[("Registry (ECR)")]
+    DFILE --> DOCK --> OCI --> REG
+  end
+
+  subgraph NODE["🖥️ node-2 — kubelet makes the pod real"]
+    KUBELET["④ kubelet notices pod<br/>bound to this node"]
+    PULL["⑤ containerd pulls image<br/>from registry"]
+    SANDBOX["⑥ create Pod sandbox<br/>('pause' container holds<br/>the network namespace)"]
+    CNIADD["⑦ CNI ADD<br/>veth pair + assign IP (IPAM)<br/>+ program NetworkPolicy"]
+    INIT["⑧ run initContainers<br/>in order, to completion"]
+    APPC["⑨ start app containers<br/>+ postStart hook"]
+    PROBES["⑩ startup → readiness<br/>→ liveness probes"]
+    READY["⑪ Pod Ready<br/>added to EndpointSlice"]
+  end
+
+  P0 --> FILTER --> SCORE --> BIND
+  BIND -.->|sets nodeName| KUBELET
+  KUBELET --> PULL
+  PULL --> REG
+  PULL --> SANDBOX --> CNIADD --> INIT --> APPC --> PROBES --> READY
+
+  click P0 t "A freshly created Pod has no node. It sits in Pending until the scheduler assigns one. Stuck Pending = no node passed filtering (resources/taints/affinity)."
+  click FILTER t "Filtering removes every node that CANNOT run the pod: not enough CPU/mem, a taint the pod doesn't tolerate, nodeSelector mismatch, affinity rules, volume zone constraints."
+  click SCORE t "Scoring ranks the nodes that survived filtering. Default favors balanced spread; you can bias toward bin-packing (MostAllocated) to save cost."
+  click BIND t "The scheduler doesn't start anything — it only writes spec.nodeName. That single write is the 'assignment'. The kubelet on that node does the rest."
+  click DFILE t "The Dockerfile defines how the image is built. It lives with the app code."
+  click DOCK t "Docker/BuildKit turns the Dockerfile into an OCI image. This runs in CI, OFF the cluster. K8s never calls Docker to run anything."
+  click OCI t "The Open Container Initiative image format. Because it's a standard, an image built by Docker runs fine under containerd or CRI-O."
+  click REG t "The image is pushed here once and pulled by any node that needs it."
+  click KUBELET t "The kubelet is the only thing on the node that talks to the control plane. Everything below happens because it saw a pod assigned to its node."
+  click PULL t "containerd (the CRI runtime) pulls the image. imagePullPolicy decides whether to re-pull or use the local cache. Auth failures here = ImagePullBackOff."
+  click SANDBOX t "Before app containers, K8s creates a 'pause' sandbox container that owns the pod's Linux network + IPC namespaces. All containers in the pod share it — that's why they share one IP and localhost."
+  click CNIADD t "kubelet calls the CNI plugin's ADD command. It creates a veth pair (one end in the pod netns, one on the node bridge), assigns the pod an IP from IPAM, and installs NetworkPolicy rules. No CNI = pod stuck in ContainerCreating."
+  click INIT t "initContainers run sequentially and must each exit 0 before app containers start. Used for migrations, waiting on dependencies, fetching config."
+  click APPC t "App containers start (in parallel). A postStart lifecycle hook can run right after start. If a container crashes repeatedly here → CrashLoopBackOff."
+  click PROBES t "startupProbe gates the others for slow starters; readinessProbe controls whether the pod receives traffic; livenessProbe restarts a hung container."
+  click READY t "Once readiness passes, the pod's IP is added to the Service's EndpointSlice and it starts receiving traffic. Failing readiness keeps it out of rotation without killing it."
