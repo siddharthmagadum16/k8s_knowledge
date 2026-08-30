@@ -21,21 +21,21 @@ Internally, the container runtime implements this by creating a hidden **pause/i
 apiVersion: v1
 kind: Pod
 metadata:
-  name: web-demo
+  name: orders-api-demo
   namespace: default
   labels:
-    app: web-demo
-    tier: frontend
+    app: orders-api
+    tier: backend
 spec:
   restartPolicy: Always          # Always | OnFailure | Never
   terminationGracePeriodSeconds: 30
   initContainers:
   - name: init-db-check
     image: busybox:1.36
-    command: ['sh', '-c', 'until nc -z db 5432; do sleep 2; done']
+    command: ['sh', '-c', 'until nc -z orders-db 5432; do sleep 2; done']
   containers:
-  - name: app
-    image: myorg/web:1.4.2
+  - name: api
+    image: myorg/orders-api:1.4.2
     ports:
     - containerPort: 8080
     env:
@@ -133,20 +133,20 @@ A ReplicaSet ensures a specified number of Pod replicas matching a label selecto
 apiVersion: apps/v1
 kind: ReplicaSet
 metadata:
-  name: web-rs
+  name: orders-api-rs
 spec:
   replicas: 3
   selector:
     matchLabels:
-      app: web
+      app: orders-api
   template:
     metadata:
       labels:
-        app: web
+        app: orders-api
     spec:
       containers:
-      - name: web
-        image: myorg/web:1.4.2
+      - name: api
+        image: myorg/orders-api:1.4.2
 ```
 
 You almost never create ReplicaSets directly — **Deployments manage ReplicaSets for you**, adding rollout/rollback semantics on top.
@@ -157,7 +157,7 @@ You almost never create ReplicaSets directly — **Deployments manage ReplicaSet
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: web
+  name: orders-api
 spec:
   replicas: 3
   revisionHistoryLimit: 10
@@ -168,32 +168,32 @@ spec:
       maxUnavailable: 0    # pods allowed to be unavailable during rollout
   selector:
     matchLabels:
-      app: web
+      app: orders-api
   template:
     metadata:
       labels:
-        app: web
+        app: orders-api
     spec:
       containers:
-      - name: web
-        image: myorg/web:1.4.2
+      - name: api
+        image: myorg/orders-api:1.4.2
         readinessProbe:
           httpGet: { path: /ready, port: 8080 }
 ```
 
 **How a rolling update works internally**: changing `spec.template` (e.g., a new image tag) causes the Deployment controller to:
-1. Create a **new ReplicaSet** with the updated Pod template (a hash of the template becomes part of its name, e.g. `web-7d9f8b6c9d`).
+1. Create a **new ReplicaSet** with the updated Pod template (a hash of the template becomes part of its name, e.g. `orders-api-7d9f8b6c9d`).
 2. Incrementally scale the new ReplicaSet up and the old one down, respecting `maxSurge` (how many Pods above desired count are allowed temporarily) and `maxUnavailable` (how many Pods below desired count are tolerated), waiting for new Pods to pass their readiness probe before proceeding further.
 3. Once the new ReplicaSet is fully scaled and old Pods are drained, the old ReplicaSet is scaled to 0 (but kept around, not deleted, up to `revisionHistoryLimit`, to enable rollback).
 
 ```bash
-kubectl set image deployment/web web=myorg/web:1.5.0
-kubectl rollout status deployment/web
-kubectl rollout history deployment/web
-kubectl rollout undo deployment/web                 # rollback to previous revision
-kubectl rollout undo deployment/web --to-revision=2  # rollback to specific revision
-kubectl rollout pause deployment/web                 # stop mid-rollout, batch further edits
-kubectl rollout resume deployment/web
+kubectl set image deployment/orders-api api=myorg/orders-api:1.5.0
+kubectl rollout status deployment/orders-api
+kubectl rollout history deployment/orders-api
+kubectl rollout undo deployment/orders-api                 # rollback to previous revision
+kubectl rollout undo deployment/orders-api --to-revision=2  # rollback to specific revision
+kubectl rollout pause deployment/orders-api                 # stop mid-rollout, batch further edits
+kubectl rollout resume deployment/orders-api
 ```
 
 Each ReplicaSet under a Deployment corresponds to one revision. `revisionHistoryLimit` controls how many old (scaled-to-0) ReplicaSets are retained for rollback — beyond that, they're garbage collected.
@@ -212,18 +212,18 @@ Deployments assume Pods are interchangeable, disposable, and identity-less — f
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: postgres
+  name: orders-db
 spec:
-  serviceName: postgres-headless    # must point at a headless Service
+  serviceName: orders-db-headless    # must point at a headless Service
   replicas: 3
   podManagementPolicy: OrderedReady  # default; Parallel skips ordering
   selector:
     matchLabels:
-      app: postgres
+      app: orders-db
   template:
     metadata:
       labels:
-        app: postgres
+        app: orders-db
     spec:
       containers:
       - name: postgres
@@ -247,20 +247,20 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: postgres-headless
+  name: orders-db-headless
 spec:
   clusterIP: None       # headless — no load-balancing VIP, DNS returns each Pod IP
   selector:
-    app: postgres
+    app: orders-db
   ports:
   - port: 5432
 ```
 
 **Stable identity mechanics**:
-- Pods are named deterministically: `postgres-0`, `postgres-1`, `postgres-2` (not random suffixes like a ReplicaSet's `web-7d9f8b6c9d-x7k2p`).
-- Each gets a stable DNS record via the headless Service: `postgres-0.postgres-headless.default.svc.cluster.local`, resolvable even as the Pod is rescheduled to a different node/IP.
-- **`volumeClaimTemplates`** creates one PersistentVolumeClaim per replica (`data-postgres-0`, `data-postgres-1`, ...); when `postgres-1`'s Pod is deleted and recreated (e.g., after a node failure), the StatefulSet controller recreates a Pod with the same name and re-attaches the *same* PVC — replica 1 always gets its own disk back, never replica 0's.
-- **Ordering**: on creation, `postgres-0` must reach Running+Ready before `postgres-1` is created, and so on (unless `podManagementPolicy: Parallel`). On scale-down, the highest ordinal is terminated first.
+- Pods are named deterministically: `orders-db-0`, `orders-db-1`, `orders-db-2` (not random suffixes like a ReplicaSet's `orders-api-7d9f8b6c9d-x7k2p`).
+- Each gets a stable DNS record via the headless Service: `orders-db-0.orders-db-headless.default.svc.cluster.local`, resolvable even as the Pod is rescheduled to a different node/IP — this is the hostname `orders-api`'s init container and app config point at.
+- **`volumeClaimTemplates`** creates one PersistentVolumeClaim per replica (`data-orders-db-0`, `data-orders-db-1`, ...); when `orders-db-1`'s Pod is deleted and recreated (e.g., after a node failure), the StatefulSet controller recreates a Pod with the same name and re-attaches the *same* PVC — replica 1 always gets its own disk back, never replica 0's.
+- **Ordering**: on creation, `orders-db-0` must reach Running+Ready before `orders-db-1` is created, and so on (unless `podManagementPolicy: Parallel`). On scale-down, the highest ordinal is terminated first.
 - Deleting a StatefulSet does **not** delete its PVCs by default — this is a deliberate safety choice (protects data); you delete the PVCs explicitly if you truly want to reclaim the storage.
 
 Use cases: PostgreSQL/MySQL replica sets, Kafka brokers, Zookeeper, Elasticsearch/OpenSearch data nodes, Cassandra, any system with per-instance persistent identity/state.
@@ -268,6 +268,8 @@ Use cases: PostgreSQL/MySQL replica sets, Kafka brokers, Zookeeper, Elasticsearc
 ## 4. DaemonSets
 
 A DaemonSet ensures **exactly one copy of a Pod runs on every node** (or every node matching a selector), automatically adding a Pod when a new node joins and removing it when a node is removed — you don't set a `replicas` count at all; it's implicitly "one per matching node."
+
+Unlike the Deployment/StatefulSet above, a DaemonSet is cluster-wide infrastructure, not something you'd deploy per-service — the same `node-log-collector` below picks up stdout/stderr from every pod on its node, `orders-api` and `orders-db` included, without either of them needing their own logging sidecar.
 
 ```yaml
 apiVersion: apps/v1
@@ -317,7 +319,7 @@ A Job runs Pods to completion — for batch/one-off work, not long-running servi
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: db-migration
+  name: orders-api-db-migration
 spec:
   completions: 1        # total successful completions needed
   parallelism: 1         # how many pods run concurrently
@@ -328,7 +330,7 @@ spec:
       restartPolicy: OnFailure   # Never or OnFailure only — Always is invalid for Jobs
       containers:
       - name: migrate
-        image: myorg/migrator:1.0
+        image: myorg/orders-api-migrate:1.5.0   # run before rolling out orders-api:1.5.0
         command: ["./migrate.sh"]
 ```
 
@@ -344,8 +346,8 @@ spec:
 
 ```bash
 kubectl get jobs
-kubectl logs job/db-migration
-kubectl delete job db-migration     # jobs are not auto-deleted; clean up manually or via ttlSecondsAfterFinished
+kubectl logs job/orders-api-db-migration
+kubectl delete job orders-api-db-migration     # jobs are not auto-deleted; clean up manually or via ttlSecondsAfterFinished
 ```
 
 Add `spec.ttlSecondsAfterFinished: 3600` to auto-delete the Job (and its Pods) some time after completion, avoiding manual cleanup accumulation.
@@ -358,7 +360,7 @@ A CronJob creates Jobs on a schedule, same syntax as Unix cron.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: nightly-backup
+  name: orders-db-backup
 spec:
   schedule: "0 2 * * *"          # 2 AM daily, in the kube-controller-manager's configured timezone (UTC by default unless spec.timeZone is set)
   timeZone: "Asia/Kolkata"
@@ -374,7 +376,7 @@ spec:
           restartPolicy: OnFailure
           containers:
           - name: backup
-            image: myorg/backup-tool:1.2
+            image: myorg/orders-db-backup:1.0
             command: ["./backup.sh"]
 ```
 
@@ -386,7 +388,7 @@ spec:
 - History limits keep a small number of completed/failed Job objects around for debugging (`kubectl get jobs`, `kubectl logs job/<name>-<timestamp>`), rest are garbage collected.
 
 ```bash
-kubectl create job manual-run --from=cronjob/nightly-backup   # trigger an ad-hoc run outside the schedule
+kubectl create job manual-run --from=cronjob/orders-db-backup   # trigger an ad-hoc run outside the schedule
 kubectl get cronjobs
 ```
 
