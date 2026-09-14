@@ -46,13 +46,15 @@ containers:
 - name: app
   envFrom:
   - configMapRef:
-      name: app-config          # every key becomes an env var
+      name: app-config          # Option A: load-entire: every key becomes an env var
   env:
-  - name: LOG_LEVEL              # or select individual keys explicitly
+  - name: LOG_LEVEL              # Option B: load-speific: select individual keys explicitly
     valueFrom:
       configMapKeyRef:
         name: app-config
         key: LOG_LEVEL
+  - name: SENTRY_DSN              # can do, but not recommend to hardcode values
+    value: '82384892302.sentry.com/project/vault'
 ```
 
 ### 1.3 Consuming as a mounted volume
@@ -243,6 +245,8 @@ spec:
 | `ReadWriteMany` (RWX) | Mountable read-write by many nodes simultaneously — requires a genuinely shared filesystem backend (NFS, CephFS, EFS, Azure Files, Filestore) — block storage (EBS/GCE PD/Azure Disk) fundamentally cannot do this. |
 | `ReadWriteOncePod` (RWOP) | Newer, stricter mode: guarantees the volume is mounted by at most a single **Pod** in the whole cluster (closes the RWO same-node-multiple-pods loophole) — for workloads that must have exclusive single-writer guarantees (e.g., some databases). |
 
+**Note: how can `ROX`/`RWX` let many nodes mount the same volume, if each node has its own physically separate disk?** They can't, if the backing storage is local disk — that's exactly the constraint. `ROX`/`RWX` only work with **network-attached/shared filesystem storage** (NFS, EFS, Azure Files, CephFS, Filestore), never with block storage like EBS/GCE PD/local SSD which is local for pod (node-level). The data physically lives on a separate storage server/service reachable over the network; every node mounts that *same remote export* over the network protocol.
+
 A database replica typically wants RWO (each replica has its own exclusive disk, as modeled by StatefulSet's `volumeClaimTemplates` — see below); a shared upload directory read by many web-tier Pods wants RWX.
 
 ### 4.3 Reclaim policies
@@ -252,6 +256,15 @@ Set on the PV (`spec.persistentVolumeReclaimPolicy`), determines what happens to
 - **Retain**: the PV and underlying storage are kept, marked `Released` — not automatically reusable by a new PVC (needs manual admin intervention: manually delete/recreate the PV object or clean and repurpose it). Safest default for anything with valuable data — accidental PVC deletion doesn't destroy the actual disk/data.
 - **Delete** (default for most dynamically provisioned PVs): the PV object **and the underlying cloud storage resource** (the actual EBS volume, etc.) are deleted automatically when the PVC is deleted. Convenient for ephemeral/dev workloads, dangerous for production data unless you're certain you want automatic teardown.
 - **Recycle** (deprecated/removed in current Kubernetes): used to do a basic `rm -rf` scrub and make the PV available again — replaced by dynamic provisioning patterns entirely.
+
+### 4.4 PV/PVC vs "just use a database"
+
+PersistentVolumes aren't a competitor to databases — they're the storage layer *underneath* one. A self-hosted database (e.g. the `orders-db` Postgres StatefulSet) needs somewhere physical to write its data files/WAL/indexes; that's exactly what the PV provides. The database software is what turns that raw storage into something queryable (SQL, transactions, indexing) — without the PV, it has nowhere to persist anything.
+
+Where each actually applies:
+- **Managed database** (RDS, DynamoDB): runs entirely outside the cluster on the provider's infra — no PV/PVC/StatefulSet involved at all. Usually the right call for structured app data (orders, users) when one fits your budget/compliance needs.
+- **Self-hosted stateful software** (a database you run yourself, Kafka, Elasticsearch, Redis with persistence): needs a PV, same pattern as `orders-db` — there's no way around it if you're not using a managed equivalent.
+- **Large files/blobs** (uploads, ML artifacts, backups): usually better served by object storage (S3/GCS) than either a PV or a database — cheaper, infinitely scalable, no attach/detach semantics. Reach for a PV here only when you specifically need real POSIX filesystem paths, not an HTTP API.
 
 ## 5. StorageClasses and Dynamic Provisioning
 
