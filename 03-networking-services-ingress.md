@@ -57,6 +57,8 @@ spec:
 
 So: ClusterIP = the stable, virtual "front door" address for a Service; kube-proxy = the mechanism that turns a packet addressed to that front door into a packet addressed to one real pod behind it.
 
+**Clarification: does Ingress determine whether a Service is headless?** No — unrelated. Headless-ness is set purely by `clusterIP: None` on the Service itself; Ingress is an L7 router that sits in front of a Service and doesn't create or require headlessness either way. The actual relationship: Ingress normally targets a **normal ClusterIP Service** as its backend (one routable address in, load-balanced to pods behind it). A **headless** Service (§5, used for StatefulSets) is rarely put behind an Ingress, precisely because the two solve opposite problems — Ingress wants one address to route to, headless exists specifically to expose individual pods instead — but nothing technically prevents it.
+
 ### 2.2 `NodePort`
 
 ```yaml
