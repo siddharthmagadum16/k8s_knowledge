@@ -17,6 +17,7 @@ Precise mental model:
 - **startupProbe**, if defined, runs first. While it is running, `livenessProbe` and `readinessProbe` are **disabled** (not evaluated at all). Only after startupProbe succeeds once do liveness/readiness begin being polled.
 - **livenessProbe** and **readinessProbe** run in parallel for the lifetime of the container once startup has succeeded (or immediately if no startupProbe is defined).
 - Readiness failures are far more common in practice than liveness failures, and readiness is what actually protects users — it's the mechanism that keeps traffic away from pods that are up but not ready (e.g., still warming a cache, or a dependency is down).
+- **Probes are defined per-container, not pod-level** — each container in a multi-container Pod has its own independent probes, and a liveness failure restarts only that one container. But the Pod-level `Ready` condition (what actually controls Service endpoint membership) is an aggregate: the Pod is only `Ready` if **every** container with a readiness probe is passing. Gotcha: a misbehaving sidecar's readiness probe can take an otherwise-healthy main container out of traffic rotation entirely.
 
 ### Consequences of misconfiguration
 
@@ -248,6 +249,23 @@ The app's PID 1 must:
 3. Finish in-flight requests within the remaining grace period.
 4. Close DB connections/flush buffers.
 5. Exit with code 0.
+
+**This is not automatic — a language runtime does not gracefully drain on SIGTERM by default.** In Go specifically, an unhandled SIGTERM terminates the process immediately (the default disposition), with zero cleanup — functionally similar to SIGKILL, just via a different signal. Graceful shutdown has to be explicitly coded:
+
+```go
+sigChan := make(chan os.Signal, 1)
+signal.Notify(sigChan, syscall.SIGTERM)
+
+go func() {
+    <-sigChan
+    ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+    defer cancel()
+    httpServer.Shutdown(ctx)   // stop accepting new conns, drain in-flight, then return
+    dbPool.Close()
+}()
+```
+
+`signal.Notify` is what intercepts SIGTERM instead of letting the default (immediate-kill) behavior run; `http.Server.Shutdown()` is Go's built-in graceful-drain method for the standard HTTP server. If a production service shows no code like this, either it's genuinely not draining gracefully (relying solely on the `preStop sleep` timing above to avoid dropped requests), or the pattern is wired up transparently inside a shared framework/bootstrap package rather than in the service's own `main.go`.
 
 **Common pitfall — PID 1 signal handling in shell wrappers.** If your container's entrypoint is a shell script (`CMD ["sh", "-c", "node server.js"]`), SIGTERM goes to the shell, not to `node`, and shells commonly do not forward signals to child processes. The app never sees SIGTERM, ignores it entirely until SIGKILL at the grace period boundary — every rollout/scale-down then hard-kills every pod, dropping in-flight requests and adding grace-period-length latency to every deploy.
 
