@@ -149,6 +149,8 @@ RBAC (Role-Based Access Control) answers: "can identity X perform verb V on reso
 
 Key nuance: a ClusterRole is a reusable permission template. Whether its scope ends up cluster-wide or namespace-local depends entirely on whether it's bound via ClusterRoleBinding or RoleBinding. This lets you define one `pod-reader` ClusterRole and bind it narrowly in one namespace via RoleBinding while binding it cluster-wide elsewhere via ClusterRoleBinding — avoiding duplicated Role definitions.
 
+**Role vs RoleBinding, in one line: a Role is just a list of permissions, inert on its own — it grants nothing until a RoleBinding maps it to an actual identity.** A `RoleBinding` is that map — `subjects` (who) on one side, `roleRef` (which Role/ClusterRole) on the other. `subjects` is a list, and each entry can be one of three kinds: `ServiceAccount` (for pods/workloads), `User` (a human, not a real K8s API object — identity comes from external auth like a client cert or OIDC token), or `Group` (also external-auth-derived, a set of users). One RoleBinding can even mix kinds in its `subjects` list, granting the same Role's permissions to a ServiceAccount, a User, and a Group all at once.
+
 ### Anatomy of a rule
 
 ```yaml
