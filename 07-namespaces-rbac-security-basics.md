@@ -171,6 +171,37 @@ rules:
 - `resources`: plural lowercase resource name, as shown by `kubectl api-resources`.
 - `verbs`: `get`, `list`, `watch`, `create`, `update`, `patch`, `delete`, `deletecollection`. `list`/`watch` are distinct from `get` — a Role granting only `get` cannot `list` (you'd need to know exact object names).
 
+### Reference: built-in API groups and their resources
+
+This covers the API groups that ship with vanilla Kubernetes (version ~1.28+; a few older groups like `extensions/v1beta1` and `policy/v1beta1` existed historically and are omitted since they're removed in current clusters). **Not exhaustive of a real cluster** — any installed CRD (cert-manager, Prometheus Operator, Argo CD, etc.) adds its own group with its own resources, and these are unbounded/cluster-specific. Always confirm against the actual cluster with `kubectl api-resources -o wide`, since add-ons and versions shift this over time.
+
+| `apiGroups` value | Resources | What lives here |
+|---|---|---|
+| `""` (core) | `pods`, `pods/log`, `pods/exec`, `pods/portforward`, `pods/status`, `services`, `endpoints`, `configmaps`, `secrets`, `namespaces`, `nodes`, `nodes/status`, `persistentvolumes`, `persistentvolumeclaims`, `serviceaccounts`, `serviceaccounts/token`, `events`, `limitranges`, `resourcequotas`, `replicationcontrollers`, `bindings` | The original, oldest resource set — most things you interact with daily |
+| `apps` | `deployments`, `statefulsets`, `daemonsets`, `replicasets`, `controllerrevisions` | Workload controllers built on ReplicaSet/Pod management |
+| `batch` | `jobs`, `cronjobs` | Run-to-completion and scheduled batch work |
+| `networking.k8s.io` | `ingresses`, `ingressclasses`, `networkpolicies` | L7 routing rules and pod traffic policy |
+| `rbac.authorization.k8s.io` | `roles`, `rolebindings`, `clusterroles`, `clusterrolebindings` | The RBAC objects themselves |
+| `storage.k8s.io` | `storageclasses`, `volumeattachments`, `csidrivers`, `csinodes`, `csistoragecapacities` | Dynamic provisioning and CSI plumbing |
+| `policy` | `poddisruptionbudgets` | Voluntary-disruption limits (drain/autoscaler safety) |
+| `autoscaling` | `horizontalpodautoscalers` (v1 CPU-only; v2 adds multi-metric/custom/external) | HPA objects |
+| `apiextensions.k8s.io` | `customresourcedefinitions` | The mechanism CRDs themselves are defined through |
+| `apiregistration.k8s.io` | `apiservices` | Registers aggregated/extension API servers (e.g. `metrics.k8s.io`) |
+| `admissionregistration.k8s.io` | `mutatingwebhookconfigurations`, `validatingwebhookconfigurations`, `validatingadmissionpolicies`, `validatingadmissionpolicybindings` | Dynamic admission control (Kyverno/OPA Gatekeeper hook in here) |
+| `coordination.k8s.io` | `leases` | Leader election and node heartbeat (`kube-node-lease` namespace) |
+| `events.k8s.io` | `events` | The newer structured Event type — **same plural name as core's `events`, different group**, see the earlier clarification on why this needs its own explicit rule |
+| `scheduling.k8s.io` | `priorityclasses` | Pod priority/preemption tiers |
+| `node.k8s.io` | `runtimeclasses` | Selects a container runtime config (e.g. gVisor/Kata) per pod |
+| `certificates.k8s.io` | `certificatesigningrequests` | In-cluster certificate issuance workflow |
+| `authentication.k8s.io` | `tokenreviews`, `selfsubjectreviews` | Used by the API server itself / webhook auth flows, not typically granted to workloads |
+| `authorization.k8s.io` | `subjectaccessreviews`, `selfsubjectaccessreviews`, `localsubjectaccessreviews`, `selfsubjectrulesreviews` | Programmatic "can this identity do X" checks — what `kubectl auth can-i` calls under the hood |
+| `discovery.k8s.io` | `endpointslices` | The sharded replacement for the legacy core `endpoints` resource |
+| `flowcontrol.apiserver.k8s.io` | `flowschemas`, `prioritylevelconfigurations` | API Priority and Fairness (protects the apiserver from request floods) |
+| `resource.k8s.io` | `resourceclaims`, `resourceclaimtemplates`, `deviceclasses` | Dynamic Resource Allocation (DRA) — newer, for GPUs/specialized hardware, still maturing across versions |
+| `metrics.k8s.io` | `nodes`, `pods` (metrics variants) | Served by metrics-server, an aggregated API, not the core apiserver — powers `kubectl top` and HPA's CPU/memory metrics |
+| `custom.metrics.k8s.io`, `external.metrics.k8s.io` | (metric-specific, no fixed resource list) | Aggregated APIs backing HPA's custom/external metric scaling (§18 performance doc) |
+| *(anything else, e.g. `cert-manager.io`, `monitoring.coreos.com`, `argoproj.io`)* | CRD-defined, varies | Installed by whatever Operator/CRD your cluster runs — check `kubectl api-resources` per cluster |
+
 ### Full worked example
 
 Goal: a CI/CD ServiceAccount in namespace `payments` that can deploy (create/update Deployments) and read logs, but cannot touch Secrets or delete namespaces.
@@ -253,7 +284,9 @@ kubectl auth can-i --list --as system:serviceaccount:payments:ci-deployer -n pay
 
 ### Built-in ClusterRoles
 
-Kubernetes ships aggregated default ClusterRoles: `cluster-admin` (full access, do not bind broadly), `admin` (full access within a namespace, including Roles/RoleBindings, but not quota/namespace itself), `edit` (read/write to most objects in a namespace, not Roles/RoleBindings/quota), `view` (read-only, excludes Secrets in recent versions). Prefer binding these over inventing new equivalents when they fit.
+Kubernetes ships aggregated default ClusterRoles: `cluster-admin` (full access, do not bind broadly), `admin` (full access within a namespace, including Roles/RoleBindings, but not quota/namespace itself), `edit` (read/write to most objects in a namespace, not Roles/RoleBindings/quota), `view` (read-only, deliberately excludes Secrets). Prefer binding these over inventing new equivalents when they fit.
+
+> **Note on the Secrets exclusion:** this has been the `view` role's behavior by design since these default aggregated ClusterRoles were introduced — not a later-version removal from a previously more permissive `view`. The rationale is explicit in upstream docs: Secrets are excluded because they're often paired with credentials (e.g. a ServiceAccount token) that could be used to escalate privileges, so "read-only" shouldn't implicitly mean "can read every credential in the namespace." Verify the exact behavior against your own cluster's Kubernetes version with `kubectl describe clusterrole view`, since defaults can still be re-aggregated/customized per-distribution.
 
 ## Pod Security Standards
 
@@ -265,6 +298,20 @@ kubectl label namespace payments \
   pod-security.kubernetes.io/enforce-version=latest \
   pod-security.kubernetes.io/audit=restricted \
   pod-security.kubernetes.io/warn=restricted
+```
+
+These are just labels on the `Namespace` object itself, so the same thing can be set declaratively instead of via the imperative command above — this is generally the better choice, since it's version-controlled and reviewable in a PR, and reconciles automatically under GitOps (drift from a manually-run `kubectl label` doesn't self-correct; a checked-in manifest does):
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: payments
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
 ```
 
 Modes: `enforce` (reject non-compliant pods), `audit` (allow but log a violation to the audit log), `warn` (allow but return a warning to the client, e.g., visible in `kubectl apply` output).
@@ -324,7 +371,7 @@ Secrets are base64-encoded (not encrypted by default at the API/etcd level unles
 
 Practical guidance:
 
-- Never grant `resources: ["*"]` or a rule listing `secrets` alongside broad verbs unless the subject genuinely needs it — read-only ClusterRoles for auditors/monitoring should explicitly exclude `secrets`, since the built-in `view` ClusterRole intentionally does this (recent Kubernetes versions strip Secret read access from `view`).
+- Never grant `resources: ["*"]` or a rule listing `secrets` alongside broad verbs unless the subject genuinely needs it — read-only ClusterRoles for auditors/monitoring should explicitly exclude `secrets`, since the built-in `view` ClusterRole intentionally does this by design (see the note above).
 - Any ServiceAccount whose token could be exfiltrated (e.g., mounted in a pod with a large network-facing attack surface) should have no RBAC access to `secrets` at all if it doesn't need it — check with `kubectl auth can-i get secrets --as system:serviceaccount:ns:sa-name -n ns`.
 - Scope Secret access with `resourceNames` where possible instead of granting access to all Secrets in a namespace:
 
