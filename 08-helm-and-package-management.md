@@ -132,6 +132,8 @@ redis:
 
 This overrides the `redis` subchart's own `auth.enabled` and `master.persistence.size` defaults. `condition: redis.enabled` in Chart.yaml lets the parent chart toggle the entire subchart on/off.
 
+**"Namespace" here is a verb** (like namespacing variables in code, unrelated to the K8s `Namespace` object): the `redis` subchart has its own `values.yaml` with keys like `auth.enabled`. Nesting overrides under a top-level `redis:` key tells Helm which subchart they belong to — it strips that wrapper and passes everything underneath as the subchart's own values, so inside redis's templates it's just `.Values.auth.enabled`, no `redis:` prefix.
+
 ## Templating basics
 
 Helm templates are Go templates (`text/template`) plus the Sprig function library, evaluated against a context that includes `.Values`, `.Release`, `.Chart`, `.Files`, `.Capabilities`.
@@ -355,3 +357,16 @@ kustomize build overlays/prod/   # render without applying, for review
 - No conditional installs of whole components based on a boolean flag the way `{{- if .Values.x }}` works in Helm — you either include a resource in an overlay's `resources:` list or you don't; toggling requires maintaining separate overlay variants or using `components` (a newer Kustomize feature for optional reusable patch sets).
 - No dependency management equivalent to Helm's `charts/` subchart mechanism — if you need "install Redis alongside my app," you either vendor Redis's manifests yourself or reach for Helm for that piece.
 - Patch precedence and merge behavior (strategic merge vs JSON6902 patches) has a learning curve of its own once overlays get deep (overlay of an overlay), even though the base language (YAML) stays simple.
+
+## Score: a layer above Helm/Kustomize
+
+[Score](https://score.dev) (`score.yaml`) is not a Helm/Kustomize alternative — it's a different abstraction layer sitting above both.
+
+Helm and Kustomize both operate on actual Kubernetes manifests: you're templating or patching Deployments, Services, Ingress — still thinking in K8s-specific objects. Score instead describes a **workload** in platform-agnostic terms — container image, ports, env vars, resource needs, dependencies — with no Kubernetes-specific fields at all. A developer writing a `score.yaml` doesn't need to know what a Deployment or Service is.
+
+A separate CLI then compiles that Score file into platform-specific output:
+- `score-k8s` → Kubernetes manifests
+- `score-compose` → Docker Compose file
+- `score-helm` → generates a Helm chart from a Score spec
+
+So Score sits **above** Helm, not beside it: developers write one `score.yaml` without touching Kubernetes YAML, and the platform team controls how it's translated into actual cluster resources — often via Helm or Kustomize underneath. It solves a developer-experience/platform-abstraction problem, not the templating/overlay problem Helm and Kustomize solve.

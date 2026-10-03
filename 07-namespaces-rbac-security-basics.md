@@ -365,6 +365,19 @@ spec:
 - **seccompProfile.type: RuntimeDefault**: applies the container runtime's default seccomp filter, blocking a large set of rarely-needed and historically-exploited syscalls.
 - `privileged: true` (avoid): grants the container essentially all host capabilities and device access — equivalent to root on the host. Reserved for specific infra pods (CNI plugins, some CSI/monitoring agents) that genuinely require host-level access; never for application workloads.
 
+```yaml
+# The opposite end of the spectrum from the hardened example above — shown to make
+# the contrast concrete, not as something to copy for an application workload.
+containers:
+- name: cni-agent
+  image: some-cni-plugin:1.0
+  securityContext:
+    privileged: true   # implicitly grants ALL capabilities + host device access —
+                        # makes any capabilities.drop/add on this container moot
+```
+
+`privileged: true` and the `restricted` Pod Security Standard are mutually exclusive — a namespace enforcing `restricted` will reject any pod setting this, which is exactly why genuinely privileged workloads (CNI/CSI DaemonSets) usually live in `kube-system` or another namespace explicitly left at the `privileged`/unset PSS level, not in an application namespace.
+
 ## Secrets and RBAC — who can read them
 
 Secrets are base64-encoded (not encrypted by default at the API/etcd level unless you've configured [encryption at rest](https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/)) — base64 is an encoding, not a security control. Anyone with `get`/`list` RBAC access to `secrets` in a namespace can trivially decode them: `kubectl get secret db-creds -o jsonpath='{.data.password}' | base64 -d`.
