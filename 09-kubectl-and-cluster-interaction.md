@@ -165,6 +165,27 @@ kubectl rollout undo deployment/payments-api --to-revision=3
 kubectl rollout restart deployment/payments-api        # force new pods without a spec change (e.g., to pick up a ConfigMap/Secret update)
 ```
 
+`rollout history` displays the `kubernetes.io/change-cause` annotation in its **CHANGE-CAUSE** column (`<none>` if absent). A rollback normally gets a new revision number, but history doesn't automatically identify which revision it rolled back to. Record that reason **after the rollback completes**, because rollback can restore the older revision's annotations:
+
+```bash
+kubectl rollout undo deployment/payments-api --to-revision=2
+kubectl rollout status deployment/payments-api
+kubectl annotate deployment/payments-api \
+  kubernetes.io/change-cause="Rollback to revision 2" --overwrite
+kubectl rollout history deployment/payments-api
+```
+
+For example, rolling back from revision 3 to revision 2, and annotation as above can produce:
+
+```text
+REVISION  CHANGE-CAUSE
+1         <none>
+3         <none>
+4         Rollback to revision 2
+```
+
+The Deployment reuses revision 2's ReplicaSet and renumbers it to 4, so a separate revision 2 entry may no longer appear. The annotation records your explanation; it is not an automatic rollback audit trail.
+
 `rollout restart` is the standard way to force pods to restart after changing a mounted ConfigMap/Secret (which doesn't itself trigger a rollout — Kubernetes doesn't watch mounted volume content for changes by default).
 
 ## Label selectors and field selectors
@@ -231,15 +252,23 @@ Uses `tar` inside the container under the hood — fails silently or with confus
 
 ### top
 
+`kubectl top` gives a recent **CPU and memory usage summary** for nodes or Pods. It shows actual usage, not the configured resource requests or limits. The metrics may lag slightly, so this is a recent snapshot rather than an instantaneous reading.
+
 ```bash
 kubectl top nodes
 kubectl top pods -n payments
 kubectl top pods --containers                        # per-container breakdown
 ```
 
-Requires the **metrics-server** add-on to be installed in the cluster (not built into the control plane by default) — if `top` returns "metrics not available," metrics-server is either missing or its pods aren't Ready. `top` reflects real-time usage from cAdvisor via the Metrics API — distinct from Prometheus/long-term monitoring; it's a live snapshot only, not historical.
+Requires a working **Metrics API**, usually provided by the **metrics-server** add-on (not built into the control plane by default). If `top` returns "metrics not available," check metrics-server and the Metrics API. Unlike Prometheus/long-term monitoring, `top` shows a recent snapshot, not historical usage.
 
 ## API discovery
+
+These commands help you find what your connected cluster supports and how to write resource definitions:
+
+- **`kubectl api-resources`** lists the available **resource types**, such as Pods, Services, and Deployments, including their short names, API versions, and whether they belong to a namespace. It lists types, not the actual Pods or Deployments running in your cluster; use `kubectl get` for those.
+- **`kubectl api-versions`** lists the supported **API groups and versions**, such as `v1`, `apps/v1`, and `batch/v1`. These are the values used in a manifest's `apiVersion` field, but each resource kind supports only particular versions; use `api-resources` to see the mapping.
+- **`kubectl explain`** describes a resource's **fields, types, and purpose**. For example, `kubectl explain pod.spec.containers` explains the `containers` field so you can understand what belongs there when writing YAML. It documents the schema, rather than inspecting a particular running Pod.
 
 ```bash
 kubectl api-resources                              # every resource type: name, shortnames, apiGroup, namespaced?, Kind
