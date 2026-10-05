@@ -22,6 +22,12 @@ Concretely, when a Pod is scheduled, kubelet calls `RunPodSandbox` via the CRI g
 - `CNI_PATH=/opt/cni/bin`
 - stdin = the JSON config from `/etc/cni/net.d/`
 
+**What the pause container is**: a minimal, near-empty container (runs a tiny binary that just sleeps/pauses forever) that Kubernetes starts first in every Pod, before any app containers. Its only job is to hold open the Pod's shared Linux namespaces — mainly the network namespace (and IPC) — it does no real work itself.
+
+Why it's needed: a Pod can have multiple containers (app + sidecars) that all share one network identity — one IP, one set of ports, one `localhost`. Without a pause container, the first app container would own that network namespace, and if it crashed and restarted, the namespace would be torn down and recreated — the Pod's IP would change and other containers would momentarily lose connectivity. The pause container is the stable anchor: app containers attach to its namespace, so they can crash and restart any number of times while the Pod's IP stays constant throughout the Pod's life.
+
+A network namespace holds its own interfaces (`lo`, `eth0`), routing table, iptables rules, ARP table, and full 0-65535 port space — which is why all containers in a Pod, sharing the pause container's namespace, see the same IP and can reach each other over `localhost`.
+
 The plugin does its work (create veth, assign IP, program routes/BPF/iptables) and prints CNI result JSON to stdout, which containerd hands back to kubelet, which uses the returned IP to populate `pod.status.podIP`.
 
 The four commands every plugin must implement:
@@ -365,7 +371,7 @@ That's **4 queries** (sometimes cited as 5 when both A and AAAA are attempted pe
 Verify by tcpdumping the CoreDNS pod or the node's DNS traffic:
 
 ```bash
-kubectl exec -it mypod -- sh -c 'nslookup api.stripe.com' 
+kubectl exec -it mypod -- sh -c 'nslookup api.stripe.com'
 # or better, capture actual query sequence:
 kubectl debug node/<node> -it --image=nicolaka/netshoot -- \
   tcpdump -i any -n port 53
