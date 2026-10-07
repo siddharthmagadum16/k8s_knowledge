@@ -4,6 +4,8 @@
 
 etcd is a replicated state machine built on Raft. Every object in the cluster — Pods, Secrets, CRDs, Leases — is a key in etcd's flat keyspace, versioned with an MVCC (multi-version concurrency control) store. Kubernetes itself has no idea what "consensus" means; it delegates all of that to etcd and only talks to it through gRPC.
 
+**What etcd actually contains**: every Kubernetes object you create — Pods, Deployments, Secrets, ConfigMaps, Nodes, Services, everything — stored as a key-value pair, roughly `/registry/<resource>/<namespace>/<name>` → the object's full serialized state. etcd has no concept of "Pod" or "Deployment"; it's just the cluster's single source of truth for what exists and what state it's in. Since this is the one source of truth, it can't safely live on a single machine (losing it means losing the ability to schedule, scale, or heal anything) — so it's replicated across multiple nodes, which is precisely why a consensus protocol like Raft is required: multiple copies need a way to agree on one consistent ordered history of changes, even when machines crash, slow down, or lose network contact, rather than silently diverging into different "truths."
+
 ### 1.1 Leader election and log replication
 
 Raft nodes are always in one of three states: `Follower`, `Candidate`, `Leader`.
@@ -104,10 +106,54 @@ This only works while you still have quorum among the *remaining* members after 
 
 **Case B: quorum is already lost (majority of members gone, e.g., 2 of 3 disks destroyed) — no clean path, must force**
 
-Two options, in order of preference:
+Prefer restoring from the most recent snapshot onto a brand-new single-node cluster (section 2.5) whenever a good snapshot exists — it's safe and deterministic. The runbook below is for when it doesn't, and you must salvage whatever data survives on a reachable member via `--force-new-cluster`. Follow it in order:
 
-1. **Restore from the most recent snapshot onto a brand-new single-node cluster**, then re-add members to grow back to 3/5 (see backup/restore section below). This is safe and deterministic — you get exactly the state as of the last snapshot.
-2. **`--force-new-cluster`** on the single surviving member if no recent snapshot exists and you need to salvage whatever data that one surviving member has:
+**1. Identify which surviving node to keep**, if more than one is reachable (if the cause is "disks destroyed," there's usually no choice — only one member has data left). Compare how much committed data each candidate has — the highest `RAFT APPLIED INDEX` is least lossy:
+
+```bash
+etcdctl --endpoints=https://10.0.1.1X:2379 endpoint status -w table
+```
+
+If etcd won't even start to run this check, compare offline without starting the server:
+
+```bash
+etcdutl snapshot status /var/lib/etcd/member/snap/db -w table
+```
+
+**2. Shut down etcd on every node except the one you picked** — do this before forcing, so nothing else can race to also declare itself leader:
+
+```bash
+# kubeadm-managed (static pod) — stop kubelet from recreating the etcd pod
+systemctl stop kubelet
+mv /etc/kubernetes/manifests/etcd.yaml /tmp/etcd.yaml.disabled
+
+# systemd-managed etcd
+systemctl stop etcd
+systemctl disable etcd
+```
+
+**3. Quarantine (don't delete) their data directories**, so they can't accidentally be restarted later and rejoin with divergent state:
+
+```bash
+mv /var/lib/etcd /var/lib/etcd.quarantined-$(date +%Y%m%d%H%M%S)
+```
+
+**4. If a losing node is flaky, corrupted, or you want it fully out of the picture, stop it at the infrastructure level too** (optional, but recommended when you don't fully trust the node to stay down on its own):
+
+```bash
+# bare metal / on-prem: hard power-off (don't wait on a graceful shutdown
+# that might hang on corrupted disk/filesystem state)
+poweroff -f
+# or, from another reachable host with IPMI/iLO access:
+ipmitool -I lanplus -H <bmc-ip> -U <user> -P <pass> chassis power off
+
+# cloud VM — stop, not terminate, so you can still inspect the disk later if needed
+aws ec2 stop-instances --instance-ids i-0123456789abcdef0
+gcloud compute instances stop <instance-name> --zone=<zone>
+az vm stop --resource-group <rg> --name <vm-name>
+```
+
+**5. On the one chosen surviving node, force a new single-member cluster:**
 
 ```bash
 etcd --force-new-cluster \
@@ -119,13 +165,20 @@ etcd --force-new-cluster \
   --advertise-client-urls=https://10.0.1.10:2379
 ```
 
-`--force-new-cluster` **unilaterally declares the local member the leader of a brand-new single-member cluster**, discarding the Raft membership list and forcing a new cluster ID. Dangers:
+This unilaterally declares the local member leader of a brand-new cluster, discarding the old Raft membership list and forcing a new cluster ID. Any writes in-flight/uncommitted on the dead members at the time of failure are permanently lost, with no way to know exactly what. **This is why steps 2-4 come first** — running this on more than one node independently creates two divergent clusters with different cluster IDs (split-brain), which is why the losing nodes must already be stopped before you reach this step, not after.
 
-- Any writes that were in-flight/uncommitted on the other (now-dead) members are permanently lost, and there is no way to know what was lost.
-- If you run `--force-new-cluster` on more than one surviving member independently (e.g., trying it on two nodes at once thinking it's "safer"), you create **two divergent clusters with the same data lineage but different cluster IDs** — a split-brain that is extremely painful to unwind, because both will think they're authoritative.
-- After forcing, you must immediately re-add members properly and take a fresh snapshot — treat the forced node as radioactive until scaled back to a real quorum.
+**6. Remove the dead members from Kubernetes' own view of the world:**
 
-This flag exists purely for emergency, last-resort recovery, not as a routine tool. Never use it if a good snapshot exists — always prefer snapshot restore.
+```bash
+kubectl delete node control-plane-node-2
+kubectl delete node control-plane-node-3
+```
+
+**7. Re-add fresh members one at a time to grow back to a real quorum (3 or 5)**, using the same `member add` → start-with-`--initial-cluster-state=existing` pattern as Case A, verifying health after each addition. Take a fresh snapshot immediately once quorum is restored, and only terminate (vs. stop) the old infrastructure once this is confirmed healthy.
+
+This flag and this whole path exist purely for emergency, last-resort recovery — never use it if a good snapshot exists.
+
+Do this on every member *except* the one you force on, before or immediately after running `--force-new-cluster` — the danger isn't just "don't force on two nodes," it's also "don't let an old member silently come back online later" (a rebooted VM, an auto-restarted systemd unit) and start gossiping its stale pre-incident state at the new cluster's peers.
 
 ---
 
